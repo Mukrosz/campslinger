@@ -12,6 +12,7 @@ import shlex
 import sys
 import threading
 import time
+import traceback
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
@@ -43,10 +44,17 @@ BCPARKS_HEADERS = {
 }
 
 _LOGGER_LOCAL = threading.local()
+# When False, pp() skips print() (Telegram bot mode with --no-terminal-log).
+_TERMINAL_LOG_ENABLED = True
 
 
 def set_log_callback(callback):
     _LOGGER_LOCAL.callback = callback
+
+
+def set_terminal_log_enabled(enabled):
+    global _TERMINAL_LOG_ENABLED
+    _TERMINAL_LOG_ENABLED = bool(enabled)
 
 
 def _emit_log(line):
@@ -56,6 +64,12 @@ def _emit_log(line):
             callback(line)
         except Exception:
             pass
+
+
+def _bot_console_line(message):
+    """Log to stderr for bot lifecycle (respects set_terminal_log_enabled)."""
+    if _TERMINAL_LOG_ENABLED:
+        print("{} - {}".format(current_time(), message), flush=True)
 
 
 def sort_key(s):
@@ -79,7 +93,8 @@ def pp(message, error=False):
     _emit_log(line)
     if error:
         sys.exit(line)
-    print(line)
+    if _TERMINAL_LOG_ENABLED:
+        print(line, flush=True)
 
 
 def shorten_url(url):
@@ -797,6 +812,13 @@ def build_arg_parser():
         default=3,
         help="Max concurrent reservation jobs in Telegram bot mode.",
     )
+    parser.add_argument(
+        "--no-terminal-log",
+        action="store_false",
+        dest="terminal_log",
+        default=True,
+        help="With --telegram-bot: do not print job or bot log lines to the terminal.",
+    )
     return parser
 
 
@@ -947,8 +969,17 @@ def telegram_help_text():
     )
 
 
+async def _tg_reply(update, text):
+    em = update.effective_message
+    if em:
+        await em.reply_text(text)
+    return em is not None
+
+
 def run_telegram_bot(args):
     from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+
+    set_terminal_log_enabled(args.terminal_log)
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     allowed_raw = os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").strip()
@@ -964,49 +995,84 @@ def run_telegram_bot(args):
         return update.effective_user and update.effective_user.id in allowed_user_ids
 
     async def reject(update):
-        await update.message.reply_text("Unauthorized")
+        await _tg_reply(update, "Unauthorized")
+
+    async def telegram_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+        err = context.error
+        _bot_console_line("Telegram handler error: {!r}".format(err))
+        if _TERMINAL_LOG_ENABLED and err is not None:
+            traceback.print_exception(type(err), err, err.__traceback__, file=sys.stderr)
+        em = getattr(update, "effective_message", None) if update is not None else None
+        if em:
+            try:
+                await em.reply_text(
+                    "Error handling this update. If it persists, check server logs."
+                )
+            except Exception:
+                pass
 
     async def _start_job(update, raw):
         if not authorized(update):
             await reject(update)
             return
+        uid = update.effective_user.id if update.effective_user else "?"
+        _bot_console_line("Job request user={} raw={!r}".format(uid, raw[:200] if raw else ""))
         try:
             job_args = parse_bot_reserve_args(raw)
         except Exception as e:
-            await update.message.reply_text("Parse error: {}\n\n{}".format(e, telegram_help_text()))
+            await _tg_reply(update, "Parse error: {}\n\n{}".format(e, telegram_help_text()))
             return
         job = manager.create(update.effective_chat.id, update.effective_user.id, job_args)
         if not job:
-            await update.message.reply_text(
-                "Server busy: max {} concurrent jobs reached.".format(manager.max_concurrent)
+            await _tg_reply(
+                update,
+                "Server busy: max {} concurrent jobs reached.".format(manager.max_concurrent),
             )
             return
         loop = asyncio.get_running_loop()
         t = threading.Thread(target=_run_job, args=(job, manager, app.bot, loop), daemon=True)
         job.thread = t
         t.start()
-        await update.message.reply_text(
+        _bot_console_line("Started job {} for user {}".format(job.job_id, uid))
+        await _tg_reply(
+            update,
             "Started job {}\nmode={}\nfilter={}".format(
                 job.job_id,
                 "warmode" if job_args.warmode else "normal",
                 ",".join(job_args.filter or []),
-            )
+            ),
         )
 
     async def help_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
             await reject(update)
             return
-        await update.message.reply_text(telegram_help_text())
+        _bot_console_line("/help user={}".format(update.effective_user.id if update.effective_user else "?"))
+        await _tg_reply(update, telegram_help_text())
 
     async def reserve_cmd(update, context: ContextTypes.DEFAULT_TYPE):
-        raw = (update.message.text or "")[len("/reserve") :].strip()
+        if context.args:
+            raw = " ".join(context.args).strip()
+        else:
+            em = update.effective_message
+            if em and em.text:
+                parts = em.text.split(None, 1)
+                raw = parts[1].strip() if len(parts) > 1 else ""
+            else:
+                raw = ""
+        if not raw:
+            await _tg_reply(
+                update,
+                "Usage: /reserve <url> [--f S1,S2] [--i 60] ...\n\n{}".format(telegram_help_text()),
+            )
+            return
         await _start_job(update, raw)
 
     async def jobs_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
             await reject(update)
             return
+        _bot_console_line("/jobs user={}".format(update.effective_user.id if update.effective_user else "?"))
         active = manager.list_active()
         recent = manager.list_recent(10)
         lines = ["Active jobs: {}".format(len(active))]
@@ -1019,20 +1085,21 @@ def run_telegram_bot(args):
                     job.job_id, job.status, job.result_site or "-", job.error or "-"
                 )
             )
-        await update.message.reply_text("\n".join(lines))
+        await _tg_reply(update, "\n".join(lines))
 
     async def status_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
             await reject(update)
             return
         if not context.args:
-            await update.message.reply_text("Usage: /status <job_id>")
+            await _tg_reply(update, "Usage: /status <job_id>")
             return
         job = manager.get(context.args[0].strip())
         if not job:
-            await update.message.reply_text("Job not found")
+            await _tg_reply(update, "Job not found")
             return
-        await update.message.reply_text(
+        await _tg_reply(
+            update,
             "job={} status={} started={} ended={} result={} error={}".format(
                 job.job_id,
                 job.status,
@@ -1040,7 +1107,7 @@ def run_telegram_bot(args):
                 job.ended_at or "-",
                 job.result_site or "-",
                 job.error or "-",
-            )
+            ),
         )
 
     async def cancel_cmd(update, context: ContextTypes.DEFAULT_TYPE):
@@ -1048,24 +1115,28 @@ def run_telegram_bot(args):
             await reject(update)
             return
         if not context.args:
-            await update.message.reply_text("Usage: /cancel <job_id>")
+            await _tg_reply(update, "Usage: /cancel <job_id>")
             return
         jid = context.args[0].strip()
         if manager.cancel(jid):
-            await update.message.reply_text("Cancellation requested for {}".format(jid))
+            _bot_console_line("/cancel {} user={}".format(jid, update.effective_user.id if update.effective_user else "?"))
+            await _tg_reply(update, "Cancellation requested for {}".format(jid))
         else:
-            await update.message.reply_text("Job {} not active".format(jid))
+            await _tg_reply(update, "Job {} not active".format(jid))
 
     async def text_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
             await reject(update)
             return
-        txt = (update.message.text or "").strip()
+        em = update.effective_message
+        txt = (em.text if em else "") or ""
+        txt = txt.strip()
         if txt.startswith("http://") or txt.startswith("https://"):
             await _start_job(update, txt)
             return
-        await update.message.reply_text("Send /help for commands.")
+        await _tg_reply(update, "Send /help for commands.")
 
+    app.add_error_handler(telegram_error_handler)
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("reserve", reserve_cmd))
     app.add_handler(CommandHandler("jobs", jobs_cmd))
@@ -1073,7 +1144,11 @@ def run_telegram_bot(args):
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    print("{} - Telegram bot started (long polling). max_concurrent={}".format(current_time(), manager.max_concurrent))
+    _bot_console_line(
+        "Telegram bot started (long polling). max_concurrent={} terminal_log={}".format(
+            manager.max_concurrent, args.terminal_log
+        )
+    )
     app.run_polling(drop_pending_updates=True)
 
 
