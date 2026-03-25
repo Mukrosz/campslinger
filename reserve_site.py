@@ -505,68 +505,155 @@ def reserve_war_mode(driver, url, requested_sites, timezone="US/Pacific", debug=
         return ""
 
 
+class _HelpFormatter(
+    argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter
+):
+    """Show defaults in option help and preserve newlines in description/epilog."""
+
+    pass
+
+
 def build_arg_parser():
     description = (
-        "Place a BC Parks campsite hold via the booking map (Selenium).\n"
-        "Normal mode: poll availability via the public API every --interval (two GETs per poll), "
-        "then use the browser only to click.\n"
-        "Warmode (--w): Selenium only — prefetch at 1 minute before 7:00 in --timezone, "
-        "click Reserve at 7:00 (no API).\n"
-        "README: https://github.com/Mukrosz/campslinger\n\n"
+        "Place a BC Parks campsite hold via the booking map (Selenium).\n\n"
+        "Normal mode:\n"
+        "  Poll the public API every --interval (two GETs per poll: resource names + map\n"
+        "  availability). When your preferred site is free in the API, load the results URL\n"
+        "  in Chrome, click the matching green map pin (icon-available), then Reserve.\n\n"
+        "Warmode (--w / --warmode):\n"
+        "  No API calls. About one minute before 7:00 in --timezone, load the map, open the\n"
+        "  sidebar for the first available preferred site, then click Reserve at 7:00.\n"
+        "  Intended for first-day-of-window bookings (see BC Parks frontcountry rules).\n\n"
+        "More context: https://github.com/Mukrosz/campslinger\n\n"
         "Examples:\n"
-        "  ./reserve_site.py --url 'https://camping.bcparks.ca/create-booking/...'\n"
-        "  ./reserve_site.py --url '...' --f 'S51,S52'\n"
-        "  ./reserve_site.py --url '...' --f 'S51' --warmode\n"
-        "  google-chrome --user-data-dir=$HOME/.bcparks-profile "
-        "--remote-debugging-port=9222 ...\n"
-        "  ./reserve_site.py --url '...' --rip 127.0.0.1 --rp 9222 --f 'S51'\n"
+        "  Reserve any available site (normal mode; API picks first free key when --f omitted).\n"
+        "    ./reserve_site.py --url 'https://camping.bcparks.ca/create-booking/...'\n"
+        "    ./reserve_site.py --u   'https://camping.bcparks.ca/create-booking/...'\n\n"
+        "  Prefer specific sites (left-to-right order = try order; first match wins).\n"
+        "    ./reserve_site.py --url '...' --f 'S51,S52,S53'\n\n"
+        "  Poll every 30 seconds instead of 60.\n"
+        "    ./reserve_site.py --url '...' --f 'S51' --interval 30\n\n"
+        "  Warmode at 7:00 Pacific (prefetch ~6:59).\n"
+        "    ./reserve_site.py --url '...' --f 'S51' --warmode\n\n"
+        "  Remote Chrome (log in first), then attach (ChromeDriver on PATH must match Chrome).\n"
+        "    google-chrome --user-data-dir=$HOME/.bcparks-profile \\\n"
+        "      --remote-debugging-port=9222 --no-first-run --no-default-browser-check\n"
+        "    ./reserve_site.py --url '...' --rip 127.0.0.1 --rp 9222 --f 'S51'\n\n"
+        "  Headed browser (debug map/timeouts on a machine with a display).\n"
+        "    ./reserve_site.py --url '...' --f 'S51' --headed\n\n"
+        "  SMS when a reservation succeeds (requires Twilio credentials).\n"
+        "    ./reserve_site.py --url '...' --f 'S51' --sms \\\n"
+        "      --twilio_sid … --twilio_auth_token … --twilio_number … --my_phone_number …\n\n"
+        "  Save map step screenshots / failure HTML when the map fails to load.\n"
+        "    ./reserve_site.py --url '...' --f 'S51' --debug"
+    )
+    epilog = (
+        "Notes:\n"
+        "  --url and --u are equivalent. Normal mode uses the API only to choose *when* and\n"
+        "  *which label* to reserve; Selenium must still click the map. Warmode uses the map\n"
+        "  only (green pins / icon-available). Debian/Linux is the tested platform; see README."
     )
     parser = argparse.ArgumentParser(
-        description=description, formatter_class=argparse.RawTextHelpFormatter
+        description=description,
+        epilog=epilog,
+        formatter_class=_HelpFormatter,
     )
     parser.add_argument(
         "--url",
         "--u",
         dest="url",
         required=True,
-        help="create-booking results URL",
+        metavar="URL",
+        help="Full create-booking *results* URL (must include resourceLocationId, mapId, "
+        "startDate, endDate in the query string).",
     )
     parser.add_argument(
         "--interval",
         "--i",
         type=int,
         default=60,
-        help="Seconds between API polls in normal mode (default: 60)",
+        metavar="SECONDS",
+        help="Seconds between API polls in normal mode (ignored in warmode).",
     )
     parser.add_argument(
         "--filter",
         "--f",
         type=comma_separated_list,
-        help="Preferred sites, comma-separated (order matters)",
+        metavar="SITES",
+        help="Comma-separated preferred campsite labels, lowercased internally. "
+        "Order matters: first API-available / first green pin match is used.",
     )
-    parser.add_argument("--sms", "--s", action="store_true", help="SMS on success")
-    parser.add_argument("--twilio_sid", "--tsid", default="")
-    parser.add_argument("--twilio_auth_token", "--tat", default="")
-    parser.add_argument("--twilio_number", "--tn", default="")
-    parser.add_argument("--my_phone_number", "--mpn", default="")
+    parser.add_argument(
+        "--sms",
+        "--s",
+        action="store_true",
+        help="Send a Twilio SMS when a reservation completes successfully.",
+    )
+    parser.add_argument(
+        "--twilio_sid",
+        "--tsid",
+        default="",
+        metavar="SID",
+        help="Twilio Account SID (required with --sms).",
+    )
+    parser.add_argument(
+        "--twilio_auth_token",
+        "--tat",
+        default="",
+        metavar="TOKEN",
+        help="Twilio auth token (required with --sms).",
+    )
+    parser.add_argument(
+        "--twilio_number",
+        "--tn",
+        default="",
+        metavar="FROM",
+        help="Twilio sending phone number (required with --sms).",
+    )
+    parser.add_argument(
+        "--my_phone_number",
+        "--mpn",
+        default="",
+        metavar="TO",
+        help="Your mobile number to receive SMS (required with --sms).",
+    )
     parser.add_argument(
         "--warmode",
         "--w",
         action="store_true",
-        help="7:00 AM reserve; prefetch at 6:59 (Selenium only, no API)",
+        help="Warmode: prefetch map ~1 minute before 07:00 in --timezone, click Reserve "
+        "at 07:00. Selenium only (no API).",
     )
-    parser.add_argument("--debug", "--d", action="store_true")
+    parser.add_argument(
+        "--debug",
+        "--d",
+        action="store_true",
+        help="Verbose diagnostics: screenshots on success; on map failure writes "
+        "reserve_map_failure.html and reserve_map_failure.png in the cwd.",
+    )
     parser.add_argument(
         "--headed",
         action="store_true",
-        help="Show browser window (no headless). Use when debugging map timeouts.",
+        help="Run Chrome with a visible window (disable headless). Useful for debugging.",
     )
     parser.add_argument(
-        "--timezone", default="US/Pacific", help="Warmode timezone (default US/Pacific)"
+        "--timezone",
+        default="US/Pacific",
+        metavar="TZ",
+        help="IANA timezone name for warmode 7:00 / prefetch timing.",
     )
-    parser.add_argument("--remote_ip", "--rip", help="Chrome remote debugging host")
     parser.add_argument(
-        "--remote_port", "--rp", type=int, help="Chrome remote debugging port"
+        "--remote_ip",
+        "--rip",
+        metavar="HOST",
+        help="Host running Chrome with --remote-debugging-port (use with --rp).",
+    )
+    parser.add_argument(
+        "--remote_port",
+        "--rp",
+        type=int,
+        metavar="PORT",
+        help="Remote debugging port (e.g. 9222). Both --rip and --rp required together.",
     )
     return parser
 
