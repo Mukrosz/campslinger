@@ -1,40 +1,61 @@
 # campslinger
 
-Small Python helpers for **BC Parks** camping at [camping.bcparks.ca](https://camping.bcparks.ca/create-booking/): watch availability via the site’s JSON API, and optionally drive the booking map in Chrome to place a cart **hold** (then finish checkout in the browser yourself).
+Tools for **BC Parks** camping at [camping.bcparks.ca](https://camping.bcparks.ca/create-booking/): poll availability over the public JSON API, and optionally use Chrome (Selenium) to place a cart **hold** on a site—then finish checkout in the browser.
 
-## Platform
+**Platform:** developed and tested on **Debian Linux** (e.g. Debian 12). Windows and macOS are not covered here.
 
-**Supported and tested: Debian Linux** (e.g. Debian 12), on a laptop or server with Google Chrome where you intend to run `reserve_site.py`.
+---
 
-**Windows and macOS are not tested** and are **not a priority** right now; instructions here target Linux.
+## Contents
 
-## What’s in this repo
+- [Repository layout](#repository-layout)
+- [How the two scripts differ](#how-the-two-scripts-differ)
+- [Requirements and setup](#requirements-and-setup)
+- [Booking URL](#booking-url)
+- [Usage](#usage)
+- [Chrome: run modes and ChromeDriver](#chrome-run-modes-and-chromedriver)
+- [Policies and disclaimer](#policies-and-disclaimer)
 
-| File | Role |
-|------|------|
-| `monitor_site_api.py` | Polls availability only (HTTP). Optional SMS (Twilio). **No browser.** |
-| `reserve_site.py` | **Normal mode:** API polling on `--interval`, then Selenium loads the results URL, finds **green** map pins (`icon-available`), clicks your preferred site, then **Reserve**. **Warmode (`--warmode`):** no API; at ~1 minute before 07:00 in `--timezone` the map is prefetched, **Reserve** is clicked at 07:00. |
+Subsections under **Usage** and **Chrome** cover each script, flags, remote attach, and troubleshooting.
+
+---
+
+## Repository layout
+
+| Path | Purpose |
+|------|---------|
+| `monitor_site_api.py` | Availability only (HTTP). Optional SMS. **No browser.** |
+| `reserve_site.py` | API + Selenium (normal) or Selenium-only (warmode). See below. |
 | `requirements.txt` | Python dependencies. |
 
-Run `python3 reserve_site.py --help` for the full CLI (examples, flags, defaults).
+Full flag list, defaults, and examples: `python3 reserve_site.py --help`.
 
-### How normal mode ties API and Selenium together
+---
 
-- The API returns **which site labels are free** (`status == 0`) for your search URL — it does **not** give DOM elements.
-- Selenium builds `{site_label: icon_element}` from the map (only pins with class **`icon-available`**).
-- The script picks the **first** site that is free in the API **and** matches your `--f` order (or the first free site if you omit `--f`), then clicks that label on the map. If the API says free but the map has not painted the pin yet, it waits for the next `--interval` and retries.
+## How the two scripts differ
 
-Warmode uses **only** the map (green pins + `--f` order); no API calls.
+### `monitor_site_api.py`
 
-Official BC Parks frontcountry rules (rolling window, 07:00 Pacific, etc.) are summarized on [bcparks.ca — Frontcountry camping](https://bcparks.ca/reservations/frontcountry-camping/).
+Repeated GETs to BC Parks JSON endpoints derived from your results URL. Prints when sites are available. No map, no clicks.
 
-## Requirements
+### `reserve_site.py`
 
-- **Python 3.10+** (3.10 / 3.11 tested on Debian)
-- **`monitor_site_api.py`:** `requests` only (see `requirements.txt`).
-- **`reserve_site.py`:** Google Chrome stable, Selenium stack, optional Twilio / `pyshorteners` / `pytz` (warmode). See `requirements.txt`.
+| Mode | API | Browser |
+|------|-----|--------|
+| **Normal (default)** | Yes: polls every `--interval` (two GETs per poll). Chooses a target site from API availability and your `--f` order. | Loads the results URL, finds **green** pins (`icon-available`), clicks the matching site, then **Reserve**. |
+| **`--warmode`** | No | At ~1 minute before 07:00 in `--timezone`, prefetches the map and sidebar; clicks **Reserve** at 07:00. |
 
-## Setup
+**Normal mode in one sentence:** the API says *which label is free*; Selenium finds the pin for that label on the map. The API does not supply DOM nodes—only labels and status.
+
+**Official booking rules** (rolling window, 07:00 Pacific, etc.): [BC Parks — Frontcountry camping](https://bcparks.ca/reservations/frontcountry-camping/).
+
+---
+
+## Requirements and setup
+
+- **Python 3.10+** (3.10 / 3.11 tested on Debian).
+- **`monitor_site_api.py`:** `requests` (and optional Twilio / `pyshorteners` per `requirements.txt`).
+- **`reserve_site.py`:** Google Chrome stable, Selenium, `webdriver-manager`; optional Twilio, `pyshorteners`, `pytz` (warmode).
 
 ```bash
 git clone https://github.com/Mukrosz/campslinger.git
@@ -44,22 +65,28 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The `venv/` directory is gitignored.
+`venv/` is gitignored.
 
-## Getting the booking URL
+---
 
-1. Open [Create booking](https://camping.bcparks.ca/create-booking/), choose park, dates, equipment, and search.
-2. On the **map/results** page, copy the full URL. It must include parameters such as `resourceLocationId`, `mapId`, `startDate`, and `endDate` (used by the API and the page).
+## Booking URL
 
-Example shape (your values will differ):
+1. Open [Create booking](https://camping.bcparks.ca/create-booking/), set park, dates, equipment, search.
+2. On the **map / results** page, copy the address bar URL. It must include parameters such as `resourceLocationId`, `mapId`, `startDate`, `endDate` (required for the API).
+
+Example shape:
 
 ```text
 https://camping.bcparks.ca/create-booking/results?resourceLocationId=...&mapId=...&startDate=2025-08-18&endDate=2025-08-25&...
 ```
 
-Use `--url` or `--u` with that string.
+Pass it as `--url` or `--u`.
 
-## Usage: monitor only (API)
+---
+
+## Usage
+
+### monitor_site_api.py
 
 ```bash
 ./monitor_site_api.py --url 'https://camping.bcparks.ca/create-booking/...'
@@ -73,53 +100,61 @@ SMS (Twilio):
   --twilio_sid … --twilio_auth_token … --twilio_number … --my_phone_number …
 ```
 
-## Usage: `reserve_site.py`
+### reserve_site.py
 
-### Normal mode (default)
-
-Polls the API every `--interval` (two GETs per poll). When a target site is available, opens Chrome once and tries map + **Reserve**.
+**Normal mode** — API polling + one browser pass when a target is free:
 
 ```bash
 ./reserve_site.py --url 'https://camping.bcparks.ca/create-booking/...'
 ./reserve_site.py --url '...' --f 'S51,S52' --i 60
 ```
 
-- **`--f`:** comma-separated preferred labels; **order is priority** (first match that is API-free and green on the map wins).
+- `--f`: comma-separated site labels. **Order is priority:** first site that is free in the API **and** shows as green on the map is used.
 
-### Warmode
+**Warmode:**
 
 ```bash
 ./reserve_site.py --url '...' --f 'S51' --warmode
 ```
 
-Uses `--timezone` (default `US/Pacific`) for 07:00 / prefetch timing. No API calls in this mode.
+Uses `--timezone` (default `US/Pacific`) for 07:00 / prefetch. No API calls.
 
-### `--headed` (visible Chrome)
+**Debugging:**
 
-Runs a normal browser window instead of headless — useful on a **machine with a display** to debug map loading. Selenium still starts its **own** Chrome process (not your everyday user Chrome), unless you use remote attach below.
-
-### `--debug`
-
-Screenshots on success; on map failure writes `reserve_map_failure.html` and `reserve_map_failure.png` in the current directory.
+| Flag | Effect |
+|------|--------|
+| `--headed` | Visible Chrome window (needs a display). Still a separate automated Chrome, not your daily profile—unless you use remote attach. |
+| `--debug` | Extra logging; on map failure writes `reserve_map_failure.html` and `reserve_map_failure.png` in the working directory. |
 
 ---
 
-## Chrome, ChromeDriver, and run modes (`reserve_site.py`)
+## Chrome: run modes and ChromeDriver
 
-### Default: headless + webdriver-manager
+`reserve_site.py` can drive Chrome in three ways:
 
-Without `--rip` / `--rp`, the script starts Chrome via Selenium and **[webdriver-manager](https://github.com/SergeyPirogov/webdriver_manager)** downloads a matching **ChromeDriver** (cached under `~/.wdm`). Install **Google Chrome** stable (`google-chrome` on `PATH`).
+| Situation | What to use |
+|-----------|-------------|
+| Default | Headless Chrome; **webdriver-manager** downloads a matching ChromeDriver to `~/.wdm`. |
+| See the browser locally | `--headed` |
+| Use your own logged-in Chrome (often script on server, browser on desktop) | `--rip` + `--rp` |
 
-### Remote attach: `--rip` / `--rp` (existing Chrome with remote debugging)
+You need **Google Chrome** stable on the machine where Chrome runs (`google-chrome` on `PATH`).
 
-Use this when you want the automation to drive **Chrome you started yourself** — typically so you can **log in** to BC Parks (or use a specific profile) in a **real window**, while the **Python script runs elsewhere** (e.g. on a headless server).
+### Default (headless)
 
-**1. On the machine that will show Chrome** (your desktop/laptop, or any host where you can run Chrome with a display):
+No `--rip` / `--rp`: Selenium starts Chrome with **`--headless=new`** and uses **webdriver-manager** so you usually do **not** install `chromedriver` by hand.
 
-- Pick a **persistent profile directory** (cookies and logins live here). Example: `$HOME/.bcparks-profile`.
-- Pick a **port** for the DevTools protocol (default **9222** is common).
+### Visible window (`--headed`)
 
-Start Chrome **before** running the script:
+Pass **`--headed`** to disable headless mode. Use on a machine with a graphical session when debugging map load or timeouts.
+
+### Remote Chrome (`--rip` / `--rp`)
+
+Attach Selenium to **Chrome you start manually**—useful for logging into BC Parks in a real profile, or when the script runs on a **server** while Chrome runs on your **desktop**.
+
+#### 1. Start Chrome (on the machine with the display)
+
+Choose a persistent profile directory and a debug port (often **9222**):
 
 ```bash
 google-chrome \
@@ -129,55 +164,50 @@ google-chrome \
   --no-default-browser-check
 ```
 
-You can change the profile path and port; use the **same port** you pass as `--rp`.
+Use the same port you pass as `--rp`. You may change the profile path.
 
-**2. Where `reserve_site.py` runs**
+#### 2. Point `reserve_site.py` at that instance
 
-- **Same machine as Chrome:** use `--rip 127.0.0.1 --rp 9222` (or the port you chose).
-- **Script on a server, Chrome on your PC (same LAN):** the server must reach the PC’s IP on the debug port. Example: PC address `192.168.1.50`, Chrome listening on `9222`:
+| Scenario | `--rip` | `--rp` |
+|----------|---------|--------|
+| Script and Chrome on **same** host | `127.0.0.1` | your port |
+| Script on **server**, Chrome on **another PC** on the LAN | PC’s LAN IP (e.g. `192.168.1.50`) | your port |
 
-  ```bash
-  ./reserve_site.py --url '...' --f 'S51' --rip 192.168.1.50 --rp 9222
-  ```
-
-  Ensure the **firewall on the PC** allows inbound **TCP** to that port from the server (or only from the server’s IP). **Do not** expose the debug port to the public internet — it is a powerful control surface.
-
-- **Script on a server, Chrome only on localhost (recommended pattern):** use **SSH local port forwarding** from the server to your desktop session:
-
-  ```bash
-  # Run from the machine where the script will execute (or use -R reverse as appropriate)
-  ssh -N -L 9222:127.0.0.1:9222 you@your-desktop
-  ```
-
-  Then on the server:
-
-  ```bash
-  ./reserve_site.py --url '...' --f 'S51' --rip 127.0.0.1 --rp 9222
-  ```
-
-  Chrome must still be running on the desktop with `--remote-debugging-port=9222` as above.
-
-**3. ChromeDriver on the machine running the script**
-
-Remote mode does **not** use webdriver-manager in the script path that attaches to the debugger. Selenium still needs a **`chromedriver`** binary on **`PATH`** on the **host where you run `reserve_site.py`**, and its **major version must match** the Chrome you started with remote debugging.
+Example (Chrome on `192.168.1.50:9222`):
 
 ```bash
-google-chrome --version
-chromedriver --version
+./reserve_site.py --url '...' --f 'S51' --rip 192.168.1.50 --rp 9222
 ```
 
-Install or update `chromedriver` if needed (see below).
+Open the firewall on the PC running Chrome for **inbound TCP** to that port from the server only. **Do not** expose the debug port to the public internet.
 
-**4. Why use remote mode**
+**SSH tunnel (common for “server runs script, desktop runs Chrome”):** on the machine where the script runs, forward the desktop’s debug port:
 
-- Log in once in a real profile; the script reuses that browser context.
-- Sometimes avoids headless-specific quirks on complex SPAs.
+```bash
+ssh -N -L 9222:127.0.0.1:9222 you@your-desktop
+```
 
-The script does **not** open a second visible window for you in remote mode; it attaches to the existing Chrome instance you started.
+Then use `--rip 127.0.0.1 --rp 9222`. Chrome must still be running on the desktop with `--remote-debugging-port=9222`.
 
-### Manual ChromeDriver install (Linux example)
+#### 3. ChromeDriver on the host that runs the script
 
-When you need a system `chromedriver` (especially for `--rip`/`--rp`):
+Remote attach does **not** use webdriver-manager for that code path. The machine where you run **`reserve_site.py`** must have **`chromedriver` on `PATH`**, and its **major version** must match the Chrome you opened with remote debugging.
+
+```bash
+google-chrome --version   # on the Chrome host
+chromedriver --version    # on the script host
+```
+
+#### 4. Why remote mode
+
+- Reuse cookies / login from a normal profile.
+- Sometimes avoids headless-only site behavior.
+
+The script **attaches** to the existing window; it does not open a second profiled Chrome for you.
+
+### Install `chromedriver` manually (Linux)
+
+Needed especially for `--rip` / `--rp`:
 
 ```bash
 CHROME_VERSION=$(google-chrome --version | awk '{print $3}')
@@ -187,21 +217,21 @@ unzip -o chromedriver-linux64.zip
 sudo install -m 755 chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
 ```
 
-### If the map still times out in headless
+### Map load troubleshooting
 
-1. **`--debug`** — failure artifacts and element counts.
-2. **`--headed`** — visible window on a machine with a display.
-3. **`--rip` / `--rp`** — attach to your own Chrome session (see above).
-4. Confirm Chrome / ChromeDriver versions match when using remote attach.
+If headless times out waiting for the map:
+
+1. **`--debug`** — saves HTML/PNG on failure.
+2. **`--headed`** — confirm the map loads visually.
+3. **`--rip` / `--rp`** — use a real logged-in session.
+4. Verify Chrome and ChromeDriver versions match when using remote attach.
 
 ---
 
-## Important notes
+## Policies and disclaimer
 
-- A successful **Reserve** click adds a timed **hold** in the cart; complete payment and details in the browser before the hold expires (on the order of ~15 minutes).
-- **Terms of use:** use these tools responsibly. Aggressive or abusive request rates can get your IP blocked; keep `--interval` reasonable for API use.
-- This is a hobby project; the BC Parks site can change and break selectors or APIs without notice.
+- A successful **Reserve** click creates a timed **hold**; complete checkout before it expires (often on the order of ~15 minutes).
+- Use responsibly: aggressive API polling can get an IP blocked—keep `--interval` reasonable.
+- Hobby project; BC Parks may change the site at any time.
 
-## License / disclaimer
-
-Use at your own risk. Not affiliated with BC Parks.
+**Not affiliated with BC Parks.** Use at your own risk.
