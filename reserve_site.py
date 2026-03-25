@@ -130,6 +130,15 @@ def bcparks_fetch_sites_map(booking_url):
     return bcparks_normalize_sites(r1.json(), r2.json())
 
 
+def api_available_labels(sites):
+    """Display labels (sorted) for sites with API status == available (0)."""
+    labels = []
+    for key in sorted(sites.keys(), key=sort_key):
+        if sites[key].get("status") == 0:
+            labels.append(sites[key].get("label", key))
+    return labels
+
+
 def pick_api_target(sites, requested_sites):
     """
     First available (status == 0) site in preference order.
@@ -157,26 +166,68 @@ def setup_webdriver_remote(ip, port):
         return None
 
 
-def setup_webdriver():
+def setup_webdriver(headed=False):
     options = Options()
-    options.add_argument("--headless=new")
+    if not headed:
+        options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--log-level=3")
     options.add_argument("--window-size=1920,1400")
+    options.add_argument(
+        "--user-agent={}".format(BCPARKS_HEADERS["User-Agent"])
+    )
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
     try:
         driver = webdriver.Chrome(
             service=ChromeService(ChromeDriverManager().install()), options=options
         )
-        driver.set_page_load_timeout(60)
+        driver.set_page_load_timeout(120)
+        try:
+            driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+        except Exception:
+            pass
         return driver
     except WebDriverException as e:
         pp("❌ WebDriver failed to start: {}".format(e))
         return None
 
 
-def get_available_sites(driver, url, max_attempts=5, retry_delay=1):
+def _dump_map_load_failure(driver, debug):
+    """Log page state; with --debug write HTML + PNG for DevTools inspection."""
+    try:
+        pp("   Diagnostic: title={!r}".format(driver.title))
+        pp("   Current URL: {}".format(driver.current_url))
+        n_mc = len(driver.find_elements(By.CSS_SELECTOR, ".map-container"))
+        n_mi = len(driver.find_elements(By.CLASS_NAME, "map-icon"))
+        pp(
+            "   Elements: .map-container={}  .map-icon={}".format(n_mc, n_mi)
+        )
+    except Exception as e:
+        pp("   Could not inspect page: {}".format(e))
+    if not debug:
+        pp(
+            "   Re-run with --debug to save reserve_map_failure.html and "
+            "reserve_map_failure.png here."
+        )
+        return
+    html_path = os.path.join(os.getcwd(), "reserve_map_failure.html")
+    png_path = os.path.join(os.getcwd(), "reserve_map_failure.png")
+    try:
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+        pp("   Wrote {}".format(html_path))
+    except Exception as e:
+        pp("   Could not write HTML: {}".format(e))
+    debug_screenshot(driver, png_path, message="Map load failure screenshot")
+
+
+def get_available_sites(driver, url, max_attempts=5, retry_delay=1, debug=False):
     """
     Selenium: map icons with class icon-available -> {label_lower: icon_element}.
     Normal mode uses this after API says a site is free; warmode uses it at prefetch.
@@ -191,11 +242,15 @@ def get_available_sites(driver, url, max_attempts=5, retry_delay=1):
             )
             driver.get(url)
 
-            WebDriverWait(driver, 45).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, ".map-container"))
+            # Map root class may change; accept .map-container OR any .map-icon.
+            WebDriverWait(driver, 90).until(
+                lambda d: (
+                    len(d.find_elements(By.CSS_SELECTOR, ".map-container")) > 0
+                    or len(d.find_elements(By.CLASS_NAME, "map-icon")) > 0
+                )
             )
 
-            WebDriverWait(driver, 45).until(
+            WebDriverWait(driver, 90).until(
                 lambda d: len(d.find_elements(By.CLASS_NAME, "map-icon")) > 0
             )
 
@@ -243,6 +298,7 @@ def get_available_sites(driver, url, max_attempts=5, retry_delay=1):
 
         except TimeoutException:
             pp("❌ Timeout waiting for map or map icons")
+            _dump_map_load_failure(driver, debug)
         except WebDriverException as e:
             pp("❌ WebDriver error: {}".format(e))
             break
@@ -255,9 +311,11 @@ def get_available_sites(driver, url, max_attempts=5, retry_delay=1):
     return {}
 
 
-def collect_available_icons_from_map(driver, url):
+def collect_available_icons_from_map(driver, url, debug=False):
     """Single navigation + parse; returns same dict shape as get_available_sites last attempt."""
-    return get_available_sites(driver, url, max_attempts=3, retry_delay=1)
+    return get_available_sites(
+        driver, url, max_attempts=3, retry_delay=1, debug=debug
+    )
 
 
 def prepare_reservation(driver, available_sites, requested_sites, debug=False):
@@ -304,16 +362,34 @@ def reserve_normal_mode(driver, url, requested_sites, interval, debug=False):
             time.sleep(interval)
             continue
 
+        avail = api_available_labels(sites)
+        if avail:
+            pp(
+                "✨ Available sites (API): {}".format(",".join(avail))
+            )
+        else:
+            pp("❌ No Availability (API)")
+            time.sleep(interval)
+            continue
+
         target = pick_api_target(sites, requested_sites)
         if not target:
-            pp("❌ No availability (API)")
+            if requested_sites:
+                pp(
+                    "❌ None of your preferred sites are free (API). "
+                    "Prefer: {} — currently available listed above.".format(
+                        ",".join(requested_sites)
+                    )
+                )
+            else:
+                pp("❌ Could not pick a target site (API); retrying…")
             time.sleep(interval)
             continue
 
         label = sites[target].get("label", target)
-        pp("✨ API reports available: {} — loading map…".format(label))
+        pp("🎯 Trying map + Reserve for: {} …".format(label))
 
-        on_map = collect_available_icons_from_map(driver, url)
+        on_map = collect_available_icons_from_map(driver, url, debug=debug)
         if target not in on_map:
             pp(
                 "⚠️  API shows {} but map has no matching available icon yet; "
@@ -389,7 +465,7 @@ def reserve_war_mode(driver, url, requested_sites, timezone="US/Pacific", debug=
     )
     wait_until(target_time - timedelta(minutes=1))
 
-    available_sites = get_available_sites(driver, url)
+    available_sites = get_available_sites(driver, url, debug=debug)
     if not available_sites:
         pp("❌ No available sites on map at prefetch time")
         return ""
@@ -448,7 +524,13 @@ def build_arg_parser():
     parser = argparse.ArgumentParser(
         description=description, formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("--url", required=True, help="create-booking results URL")
+    parser.add_argument(
+        "--url",
+        "--u",
+        dest="url",
+        required=True,
+        help="create-booking results URL",
+    )
     parser.add_argument(
         "--interval",
         "--i",
@@ -475,6 +557,11 @@ def build_arg_parser():
     )
     parser.add_argument("--debug", "--d", action="store_true")
     parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Show browser window (no headless). Use when debugging map timeouts.",
+    )
+    parser.add_argument(
         "--timezone", default="US/Pacific", help="Warmode timezone (default US/Pacific)"
     )
     parser.add_argument("--remote_ip", "--rip", help="Chrome remote debugging host")
@@ -499,7 +586,7 @@ def main():
     if args.remote_ip and args.remote_port:
         driver = setup_webdriver_remote(args.remote_ip, args.remote_port)
     else:
-        driver = setup_webdriver()
+        driver = setup_webdriver(headed=args.headed)
 
     if not driver:
         sys.exit("❌ WebDriver initialization failed.")

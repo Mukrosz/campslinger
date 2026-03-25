@@ -136,6 +136,13 @@ Debug screenshots (saved in the current working directory):
 ./reserve_site.py --url '...' --f 'S51' --debug
 ```
 
+**Map timeout (“Timeout waiting for map or map icons”)** — the API can see availability before the map finishes in headless Chrome (slow network, bot checks, or DOM changes). Try in order:
+
+1. **`--debug`** — prints counts for `.map-container` / `.map-icon` and writes `reserve_map_failure.html` and `reserve_map_failure.png` on failure. Open the HTML in a browser or search it for `map-icon` / `map-container` in DevTools on the live site to see if class names changed.
+2. **`--headed`** — runs a visible Chrome window so you can watch the map load (useful on a machine with a display; for SSH use X forwarding or VNC).
+3. **`--rip` / `--rp`** — attach to your normal Chrome session (see above) so the map behaves like manual browsing.
+4. Confirm **`google-chrome`** matches the **ChromeDriver** version when using remote mode.
+
 ## Important notes
 
 - A successful **Reserve** click adds a timed **hold** in the cart; complete payment and details in the browser before the hold expires (on the order of ~15 minutes).
