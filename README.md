@@ -5,7 +5,7 @@
 This repository is a small helper project for people who book frontcountry camping on **[BC Parks’ online reservation site](https://camping.bcparks.ca/create-booking/)**. It was built for personal use on **Linux** (Debian-style systems):
 
 - **Watch** whether campsites are free (without clicking around the map every minute).
-- **Optionally try to put a site in your cart** (“Reserve”) when something matches what you want—then you finish payment and details yourself in the normal website checkout.
+- **Optionally try to put a site in your cart** (“Reserve”) when something matches what you want - then you finish payment and details yourself in the normal website checkout.
 
 You do **not** need to have written any of this code to use it. Basic comfort with a terminal (running commands), copying a URL from your browser, and installing Python helps.
 
@@ -29,9 +29,9 @@ You do **not** need to have written any of this code to use it. Basic comfort wi
 
 | File | What it’s for |
 |------|----------------|
-| `monitor_site_api.py` | Checks availability only. Uses the park website’s public data in the background—**no separate browser window** opened by the script. Optional text-message alerts (Twilio). |
+| `monitor_site_api.py` | Checks availability only. Uses the park website’s public data in the background - **no separate browser window** opened by the script. Optional text-message alerts (Twilio). |
 | `reserve_site.py` | The main “try to Reserve” script: it can watch availability and drive an automated **Chrome** session to click the map and **Reserve** when conditions match. This is the script that has been **used and tested** here. |
-| [`reserve_site_v2.py`](#reserve_site_v2py-experimental--telegram) | **Work in progress.** Same idea as `reserve_site.py`, plus an optional **Telegram bot** so you could start jobs from your phone. **Not fully tested yet**—expect rough edges; prefer `reserve_site.py` for anything important. |
+| [`reserve_site_v2.py`](#reserve_site_v2py-experimental--telegram) | **Work in progress.** Same idea as `reserve_site.py`, plus an optional **Telegram bot** so you could start jobs from your phone. **Not fully tested yet** - expect rough edges; prefer `reserve_site.py` for anything important. |
 | `requirements.txt` | List of Python packages to install (`pip install -r requirements.txt`). |
 
 For every command-line option and built-in examples:
@@ -53,10 +53,10 @@ Two behaviors:
 
 | Mode | In simple terms |
 |------|------------------|
-| **Normal (default)** | Every so often (e.g. every 60 seconds), the script quietly checks **which site numbers are free**. When one you care about is free, it opens an automated Chrome, finds that site on the **map** (green “available” marker), and clicks **Reserve** so the site lands in the cart/hold—**you still complete checkout on the website.** |
-| **Warmode (`--warmode`)** | For the “opens at 7 a.m. Pacific” style window: about a minute before 7, it loads the map and prepares the **Reserve** step, then clicks at 7. No background “availability check” loop for that mode—see BC Parks’ own rules for how far ahead you can book. |
+| **Normal (default)** | Every so often (e.g. every 60 seconds), the script quietly checks **which site numbers are free**. When one you care about is free, it opens an automated Chrome, finds that site on the **map** (green “available” marker), and clicks **Reserve** so the site lands in the cart/hold - **you still complete checkout on the website.** |
+| **Warmode (`--warmode`)** | For the “opens at 7 a.m. Pacific” style window: about a minute before 7, it loads the map and prepares the **Reserve** step, then clicks at 7. No background “availability check” loop for that mode - see BC Parks’ own rules for how far ahead you can book. |
 
-**Why two steps?** In normal mode, the quick background check saves constantly loading the full map; the script only uses the full map when it’s time to click. Official booking rules (how far ahead, 7 a.m. Pacific, etc.) are on **[BC Parks — Frontcountry camping](https://bcparks.ca/reservations/frontcountry-camping/)**.
+**Why two steps?** In normal mode, the quick background check saves constantly loading the full map; the script only uses the full map when it’s time to click. Official booking rules (how far ahead, 7 a.m. Pacific, etc.) are on **[BC Parks  -  Frontcountry camping](https://bcparks.ca/reservations/frontcountry-camping/)**.
 
 ---
 
@@ -173,15 +173,15 @@ Example chat commands (for testing only):
 
 | Situation | What to use |
 |-----------|-------------|
-| Default on a server | **Headless** Chrome—the script runs a browser you don’t see; **`webdriver-manager`** usually **downloads** a matching **ChromeDriver** on first run (see below). **Google Chrome itself** is not installed by the script or `pip`. |
+| Default on a server | **Headless** Chrome - the script runs a browser you don’t see; **`webdriver-manager`** usually **downloads** a matching **ChromeDriver** on first run (see below). **Google Chrome itself** is not installed by the script or `pip`. |
 | You want to *see* what’s happening | `--headed` (only on a computer with a normal desktop session). |
 | The script runs on a **server** but you want to use **your own Chrome** on another computer (e.g. already logged in) | `--rip` and `--rp` point at that Chrome’s “remote debugging” port. |
 
-You need **Google Chrome** installed where the browser actually runs. Headless mode still launches that same **`google-chrome`** binary with a headless flag—it is not a separate “headless-only” package.
+You need **Google Chrome** installed where the browser actually runs. Headless mode still launches that same **`google-chrome`** binary with a headless flag - it is not a separate “headless-only” package.
 
 ### Chrome and ChromeDriver on the script machine (typical headless server)
 
-These steps assume a **64-bit x86 (amd64)** Linux host. Bare servers often ship without Chrome—install the browser first, then wire the driver.
+These steps assume a **64-bit x86 (amd64)** Linux host. Bare servers often ship without Chrome - install the browser first, then wire the driver.
 
 #### 1. Install Google Chrome (Debian / Ubuntu)
 
@@ -201,11 +201,11 @@ google-chrome --version
 
 #### 2. Is ChromeDriver auto-installed?
 
-**Partially, and only in default mode.** When you **do not** pass `--rip` / `--rp`, `reserve_site.py` calls **`ChromeDriverManager().install()`** from the **`webdriver-manager`** package (see `requirements.txt`). That **downloads** a ChromeDriver build into a cache (commonly under **`~/.wdm`**) and passes it to Selenium—it does **not** run `apt install chromedriver`, and it does **not** install Chrome.
+**Partially, and only in default mode.** When you **do not** pass `--rip` / `--rp`, `reserve_site.py` calls **`ChromeDriverManager().install()`** from the **`webdriver-manager`** package (see `requirements.txt`). That **downloads** a ChromeDriver build into a cache (commonly under **`~/.wdm`**) and passes it to Selenium - it does **not** run `apt install chromedriver`, and it does **not** install Chrome.
 
 You can skip **manual** ChromeDriver setup on the script host **if** default mode works and the download succeeds. You may still need a **manual** driver if you use **remote attach** (`--rip` / `--rp`), an older copy of the script **without** `webdriver-manager`, or **`webdriver-manager` fails** (no HTTPS to Google/storage, disk permissions, proxy, or unusual version detection).
 
-**Remote mode always needs `chromedriver` on `PATH`** on the machine that runs the script, matching the Chrome you attached to—see below.
+**Remote mode always needs `chromedriver` on `PATH`** on the machine that runs the script, matching the Chrome you attached to - see below.
 
 #### 3. Install ChromeDriver manually (Linux)
 
@@ -222,7 +222,7 @@ chromedriver --version
 
 ### Visible window (`--headed`)
 
-Turns off headless mode so a window appears—helpful when the map seems stuck or you want to watch clicks.
+Turns off headless mode so a window appears - helpful when the map seems stuck or you want to watch clicks.
 
 ### Your own Chrome (`--rip` / `--rp`)
 
@@ -303,7 +303,7 @@ If invisible Chrome keeps timing out on the map:
 ## Policies and disclaimer
 
 - A successful **Reserve** click usually puts a **time-limited hold** in the cart; finish checkout before it expires (often on the order of ~15 minutes).
-- Use tools like this responsibly. Polling too aggressively can get an IP blocked—keep reasonable intervals.
+- Use tools like this responsibly. Polling too aggressively can get an IP blocked - keep reasonable intervals.
 - This is a hobby project; BC Parks may change the website at any time.
 
 **Not affiliated with BC Parks.** Use at your own risk.
