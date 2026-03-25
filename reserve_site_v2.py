@@ -6,6 +6,7 @@ Warmode uses Selenium only — prefetch at T-1 minute, click Reserve at 7:00 (no
 
 import argparse
 import asyncio
+import json
 import os
 import re
 import shlex
@@ -36,6 +37,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 BCPARKS_API_BASE = "https://camping.bcparks.ca/api/"
+# Allowed booking page host/path for user-supplied URLs (Telegram + CLI). Do not log secrets.
+_BCPARKS_BOOKING_HOST = "camping.bcparks.ca"
+_BCPARKS_BOOKING_PATH_PREFIX = "/create-booking/"
 BCPARKS_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -46,6 +50,59 @@ BCPARKS_HEADERS = {
 _LOGGER_LOCAL = threading.local()
 # When False, pp() skips print() (Telegram bot mode with --no-terminal-log).
 _TERMINAL_LOG_ENABLED = True
+_audit_lock = threading.Lock()
+_audit_write_warned = False
+
+
+def validate_bcparks_booking_url(url):
+    """
+    Reject non-BC-Parks URLs before HTTP or browser navigation (SSRF hardening).
+    """
+    if not url or not isinstance(url, str):
+        raise ValueError("Missing booking URL")
+    u = url.strip()
+    p = urlparse(u)
+    if (p.scheme or "").lower() != "https":
+        raise ValueError("Booking URL must use https")
+    host = (p.hostname or "").lower()
+    if host != _BCPARKS_BOOKING_HOST:
+        raise ValueError("Booking URL must be on camping.bcparks.ca")
+    path = p.path or ""
+    if not path.startswith(_BCPARKS_BOOKING_PATH_PREFIX):
+        raise ValueError("Booking URL path must start with {}".format(_BCPARKS_BOOKING_PATH_PREFIX))
+    if p.username or p.password:
+        raise ValueError("Booking URL must not contain embedded credentials")
+    if p.port not in (None, 443):
+        raise ValueError("Booking URL must use default HTTPS port")
+    return u
+
+
+def audit_log(action, user_id=None, chat_id=None, **fields):
+    """
+    Append one JSON line per event (user_id, action, ...). Never pass tokens or API keys.
+    Path: CAMPSLINGER_AUDIT_LOG env (default campslinger_telegram_audit.log in cwd).
+    """
+    path = (os.getenv("CAMPSLINGER_AUDIT_LOG") or "campslinger_telegram_audit.log").strip()
+    if not path:
+        return
+    rec = {"ts": datetime.now().isoformat(timespec="seconds"), "action": action}
+    if user_id is not None:
+        rec["user_id"] = user_id
+    if chat_id is not None:
+        rec["chat_id"] = chat_id
+    for k, v in fields.items():
+        if v is not None:
+            rec[k] = v
+    line = json.dumps(rec, ensure_ascii=False) + "\n"
+    global _audit_write_warned
+    try:
+        with _audit_lock:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(line)
+    except OSError as e:
+        if not _audit_write_warned:
+            _audit_write_warned = True
+            print("Warning: audit log write failed: {}".format(e), file=sys.stderr, flush=True)
 
 
 def set_log_callback(callback):
@@ -186,6 +243,7 @@ def bcparks_fetch_sites_map(booking_url):
     Two GETs (resources + availability). Returns dict site_key_lower -> {status, id, label}
     or raises on HTTP/JSON/parse errors.
     """
+    validate_bcparks_booking_url(booking_url)
     site_name_params = bcparks_parse_url(
         booking_url, ["resourceLocationId", "mapId"]
     )
@@ -902,6 +960,7 @@ def parse_bot_reserve_args(raw_text):
     args = parser.parse_args(tokens)
     if not args.url:
         raise ValueError("Missing URL. Usage: /reserve <url> [--f ... --i ...]")
+    validate_bcparks_booking_url(args.url)
     return args
 
 
@@ -932,6 +991,14 @@ def _run_job(job, manager, bot, loop):
         except ImportError:
             _send_telegram_text(bot, loop, job.chat_id, "❌ Twilio module not installed")
             manager.mark_done(job.job_id, "error", error="missing_twilio")
+            audit_log(
+                "job_aborted",
+                user_id=job.user_id,
+                chat_id=job.chat_id,
+                job_id=job.job_id,
+                reason="missing_twilio",
+                url=args.url,
+            )
             set_log_callback(None)
             return
 
@@ -942,6 +1009,14 @@ def _run_job(job, manager, bot, loop):
     if not driver:
         _send_telegram_text(bot, loop, job.chat_id, "❌ WebDriver initialization failed")
         manager.mark_done(job.job_id, "error", error="webdriver_init_failed")
+        audit_log(
+            "job_aborted",
+            user_id=job.user_id,
+            chat_id=job.chat_id,
+            job_id=job.job_id,
+            reason="webdriver_init_failed",
+            url=args.url,
+        )
         set_log_callback(None)
         return
 
@@ -969,6 +1044,14 @@ def _run_job(job, manager, bot, loop):
         if job.stop_event.is_set():
             manager.mark_done(job.job_id, "cancelled")
             _send_telegram_text(bot, loop, job.chat_id, "🛑 Job {} cancelled".format(job.job_id))
+            audit_log(
+                "job_finished",
+                user_id=job.user_id,
+                chat_id=job.chat_id,
+                job_id=job.job_id,
+                status="cancelled",
+                url=args.url,
+            )
             return
 
         if reserved_site:
@@ -988,14 +1071,40 @@ def _run_job(job, manager, bot, loop):
                 job.chat_id,
                 "✅ Job {} success. Reserved: {}".format(job.job_id, reserved_site),
             )
+            audit_log(
+                "job_finished",
+                user_id=job.user_id,
+                chat_id=job.chat_id,
+                job_id=job.job_id,
+                status="success",
+                result_site=reserved_site,
+                url=args.url,
+            )
         else:
             manager.mark_done(job.job_id, "failed", error="no_reservation")
             _send_telegram_text(
                 bot, loop, job.chat_id, "❌ Job {} finished without reservation".format(job.job_id)
             )
+            audit_log(
+                "job_finished",
+                user_id=job.user_id,
+                chat_id=job.chat_id,
+                job_id=job.job_id,
+                status="failed",
+                url=args.url,
+            )
     except Exception as e:
         manager.mark_done(job.job_id, "error", error=str(e))
         _send_telegram_text(bot, loop, job.chat_id, "❌ Job {} error: {}".format(job.job_id, e))
+        audit_log(
+            "job_finished",
+            user_id=job.user_id,
+            chat_id=job.chat_id,
+            job_id=job.job_id,
+            status="error",
+            error=str(e),
+            url=args.url,
+        )
     finally:
         if not use_remote:
             try:
@@ -1030,6 +1139,7 @@ def run_telegram_bot(args):
 
     set_terminal_log_enabled(args.terminal_log)
 
+    # TELEGRAM_BOT_TOKEN must never be logged, written to audit_log, or echoed to users.
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     allowed_raw = os.getenv("TELEGRAM_ALLOWED_USER_IDS", "").strip()
     if not token:
@@ -1044,21 +1154,35 @@ def run_telegram_bot(args):
         return update.effective_user and update.effective_user.id in allowed_user_ids
 
     async def reject(update):
+        uid = update.effective_user.id if update.effective_user else None
+        cid = update.effective_chat.id if update.effective_chat else None
+        uname = update.effective_user.username if update.effective_user else None
+        audit_log("unauthorized", user_id=uid, chat_id=cid, username=uname)
         await _tg_reply(update, "Unauthorized")
 
     async def telegram_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
         err = context.error
+        uid = update.effective_user.id if update and update.effective_user else None
+        cid = update.effective_chat.id if update and update.effective_chat else None
+        audit_log(
+            "handler_error",
+            user_id=uid,
+            chat_id=cid,
+            error_type=type(err).__name__ if err else None,
+            error=str(err)[:500] if err else None,
+        )
         _bot_console_line("Telegram handler error: {!r}".format(err))
         if _TERMINAL_LOG_ENABLED and err is not None:
             traceback.print_exception(type(err), err, err.__traceback__, file=sys.stderr)
-        em = getattr(update, "effective_message", None) if update is not None else None
-        if em:
-            try:
-                await em.reply_text(
-                    "Error handling this update. If it persists, check server logs."
-                )
-            except Exception:
-                pass
+        if update and authorized(update):
+            em = getattr(update, "effective_message", None)
+            if em:
+                try:
+                    await em.reply_text(
+                        "Error handling this update. If it persists, check server logs."
+                    )
+                except Exception:
+                    pass
 
     async def _start_job(update, raw):
         if not authorized(update):
@@ -1069,15 +1193,37 @@ def run_telegram_bot(args):
         try:
             job_args = parse_bot_reserve_args(raw)
         except Exception as e:
+            audit_log(
+                "reserve_parse_error",
+                user_id=uid if isinstance(uid, int) else None,
+                chat_id=update.effective_chat.id if update.effective_chat else None,
+                error=str(e)[:500],
+            )
             await _tg_reply(update, "Parse error: {}\n\n{}".format(e, telegram_help_text()))
             return
         job = manager.create(update.effective_chat.id, update.effective_user.id, job_args)
         if not job:
+            audit_log(
+                "job_rejected_busy",
+                user_id=uid if isinstance(uid, int) else None,
+                chat_id=update.effective_chat.id if update.effective_chat else None,
+                max_concurrent=manager.max_concurrent,
+            )
             await _tg_reply(
                 update,
                 "Server busy: max {} concurrent jobs reached.".format(manager.max_concurrent),
             )
             return
+        audit_log(
+            "job_queued",
+            user_id=job.user_id,
+            chat_id=job.chat_id,
+            job_id=job.job_id,
+            url=job_args.url,
+            warmode=bool(job_args.warmode),
+            interval=job_args.interval,
+            filter=",".join(job_args.filter) if job_args.filter else "",
+        )
         loop = asyncio.get_running_loop()
         t = threading.Thread(target=_run_job, args=(job, manager, app.bot, loop), daemon=True)
         job.thread = t
@@ -1096,10 +1242,15 @@ def run_telegram_bot(args):
         if not authorized(update):
             await reject(update)
             return
-        _bot_console_line("/help user={}".format(update.effective_user.id if update.effective_user else "?"))
+        uid = update.effective_user.id if update.effective_user else None
+        _bot_console_line("/help user={}".format(uid if uid is not None else "?"))
+        audit_log("command_help", user_id=uid, chat_id=update.effective_chat.id if update.effective_chat else None)
         await _tg_reply(update, telegram_help_text())
 
     async def reserve_cmd(update, context: ContextTypes.DEFAULT_TYPE):
+        if not authorized(update):
+            await reject(update)
+            return
         if context.args:
             raw = " ".join(context.args).strip()
         else:
@@ -1110,6 +1261,11 @@ def run_telegram_bot(args):
             else:
                 raw = ""
         if not raw:
+            audit_log(
+                "command_reserve_usage",
+                user_id=update.effective_user.id if update.effective_user else None,
+                chat_id=update.effective_chat.id if update.effective_chat else None,
+            )
             await _tg_reply(
                 update,
                 "Usage: /reserve <url> [--f S1,S2] [--i 60] ...\n\n{}".format(telegram_help_text()),
@@ -1121,7 +1277,9 @@ def run_telegram_bot(args):
         if not authorized(update):
             await reject(update)
             return
-        _bot_console_line("/jobs user={}".format(update.effective_user.id if update.effective_user else "?"))
+        uid = update.effective_user.id if update.effective_user else None
+        _bot_console_line("/jobs user={}".format(uid if uid is not None else "?"))
+        audit_log("command_jobs", user_id=uid, chat_id=update.effective_chat.id if update.effective_chat else None)
         active = manager.list_active()
         recent = manager.list_recent(10)
         lines = ["Active jobs: {}".format(len(active))]
@@ -1140,10 +1298,21 @@ def run_telegram_bot(args):
         if not authorized(update):
             await reject(update)
             return
+        uid = update.effective_user.id if update.effective_user else None
+        cid = update.effective_chat.id if update.effective_chat else None
         if not context.args:
+            audit_log("command_status", user_id=uid, chat_id=cid, job_id=None)
             await _tg_reply(update, "Usage: /status <job_id>")
             return
-        job = manager.get(context.args[0].strip())
+        jid = context.args[0].strip()
+        job = manager.get(jid)
+        audit_log(
+            "command_status",
+            user_id=uid,
+            chat_id=cid,
+            job_id=jid,
+            found=job is not None,
+        )
         if not job:
             await _tg_reply(update, "Job not found")
             return
@@ -1163,12 +1332,23 @@ def run_telegram_bot(args):
         if not authorized(update):
             await reject(update)
             return
+        uid = update.effective_user.id if update.effective_user else None
+        cid = update.effective_chat.id if update.effective_chat else None
         if not context.args:
+            audit_log("command_cancel", user_id=uid, chat_id=cid, job_id=None)
             await _tg_reply(update, "Usage: /cancel <job_id>")
             return
         jid = context.args[0].strip()
-        if manager.cancel(jid):
-            _bot_console_line("/cancel {} user={}".format(jid, update.effective_user.id if update.effective_user else "?"))
+        ok = manager.cancel(jid)
+        audit_log(
+            "command_cancel",
+            user_id=uid,
+            chat_id=cid,
+            job_id=jid,
+            accepted=ok,
+        )
+        if ok:
+            _bot_console_line("/cancel {} user={}".format(jid, uid if uid is not None else "?"))
             await _tg_reply(update, "Cancellation requested for {}".format(jid))
         else:
             await _tg_reply(update, "Job {} not active".format(jid))
@@ -1180,9 +1360,17 @@ def run_telegram_bot(args):
         em = update.effective_message
         txt = (em.text if em else "") or ""
         txt = txt.strip()
+        uid = update.effective_user.id if update.effective_user else None
+        cid = update.effective_chat.id if update.effective_chat else None
         if txt.startswith("http://") or txt.startswith("https://"):
             await _start_job(update, txt)
             return
+        audit_log(
+            "text_message",
+            user_id=uid,
+            chat_id=cid,
+            preview=txt[:200],
+        )
         await _tg_reply(update, "Send /help for commands.")
 
     app.add_error_handler(telegram_error_handler)
@@ -1193,6 +1381,12 @@ def run_telegram_bot(args):
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
+    audit_log(
+        "bot_start",
+        max_concurrent=manager.max_concurrent,
+        terminal_log=args.terminal_log,
+        audit_log_path=(os.getenv("CAMPSLINGER_AUDIT_LOG") or "campslinger_telegram_audit.log").strip(),
+    )
     _bot_console_line(
         "Telegram bot started (long polling). max_concurrent={} terminal_log={}".format(
             manager.max_concurrent, args.terminal_log
@@ -1210,6 +1404,11 @@ def main():
 
     if not args.url:
         sys.exit("Error: --url/--u is required in CLI mode")
+
+    try:
+        validate_bcparks_booking_url(args.url)
+    except ValueError as e:
+        sys.exit("Invalid booking URL: {}".format(e))
 
     client = None
     if args.sms:
