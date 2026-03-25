@@ -181,6 +181,8 @@ Example (Chrome on `192.168.1.50:9222`):
 
 Open the firewall on the PC running Chrome for **inbound TCP** to that port from the server only. **Do not** expose the debug port to the public internet.
 
+**Note on LAN connections:** on many modern Chrome builds, the remote-debugging port binds to `127.0.0.1` by default. In that case, connecting directly to `desktop_ip:9222` from your server will fail even on a trusted LAN. The most reliable approach is an **SSH tunnel**.
+
 **SSH tunnel (common for “server runs script, desktop runs Chrome”):** on the machine where the script runs, forward the desktop’s debug port:
 
 ```bash
@@ -188,6 +190,14 @@ ssh -N -L 9222:127.0.0.1:9222 you@your-desktop
 ```
 
 Then use `--rip 127.0.0.1 --rp 9222`. Chrome must still be running on the desktop with `--remote-debugging-port=9222`.
+
+If you don’t have SSH access to your desktop yet (Debian/Ubuntu), install and enable an SSH server there:
+
+```bash
+sudo apt update
+sudo apt install -y openssh-server
+sudo systemctl enable --now ssh
+```
 
 #### 3. ChromeDriver on the host that runs the script
 
