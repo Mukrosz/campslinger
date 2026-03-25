@@ -173,15 +173,52 @@ Example chat commands (for testing only):
 
 | Situation | What to use |
 |-----------|-------------|
-| Default on a server | **Headless** Chrome—the script runs a browser you don’t see; a helper usually installs the right **ChromeDriver** automatically. |
+| Default on a server | **Headless** Chrome—the script runs a browser you don’t see; **`webdriver-manager`** usually **downloads** a matching **ChromeDriver** on first run (see below). **Google Chrome itself** is not installed by the script or `pip`. |
 | You want to *see* what’s happening | `--headed` (only on a computer with a normal desktop session). |
 | The script runs on a **server** but you want to use **your own Chrome** on another computer (e.g. already logged in) | `--rip` and `--rp` point at that Chrome’s “remote debugging” port. |
 
-You need **Google Chrome** installed where the browser actually runs.
+You need **Google Chrome** installed where the browser actually runs. Headless mode still launches that same **`google-chrome`** binary with a headless flag—it is not a separate “headless-only” package.
 
-### Usual server setup (headless)
+### Chrome and ChromeDriver on the script machine (typical headless server)
 
-If you do **not** use `--rip` / `--rp`, the script starts its own Chrome without a window and normally does **not** require you to manually install **ChromeDriver**.
+These steps assume a **64-bit x86 (amd64)** Linux host. Bare servers often ship without Chrome—install the browser first, then wire the driver.
+
+#### 1. Install Google Chrome (Debian / Ubuntu)
+
+Using Google’s APT repository:
+
+```bash
+sudo apt update
+sudo apt install -y wget gnupg
+wget -q -O - https://dl.google.com/linux/linux_signing_key.pub \
+  | sudo gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" \
+  | sudo tee /etc/apt/sources.list.d/google-chrome.list
+sudo apt update
+sudo apt install -y google-chrome-stable
+google-chrome --version
+```
+
+#### 2. Is ChromeDriver auto-installed?
+
+**Partially, and only in default mode.** When you **do not** pass `--rip` / `--rp`, `reserve_site.py` calls **`ChromeDriverManager().install()`** from the **`webdriver-manager`** package (see `requirements.txt`). That **downloads** a ChromeDriver build into a cache (commonly under **`~/.wdm`**) and passes it to Selenium—it does **not** run `apt install chromedriver`, and it does **not** install Chrome.
+
+You can skip **manual** ChromeDriver setup on the script host **if** default mode works and the download succeeds. You may still need a **manual** driver if you use **remote attach** (`--rip` / `--rp`), an older copy of the script **without** `webdriver-manager`, or **`webdriver-manager` fails** (no HTTPS to Google/storage, disk permissions, proxy, or unusual version detection).
+
+**Remote mode always needs `chromedriver` on `PATH`** on the machine that runs the script, matching the Chrome you attached to—see below.
+
+#### 3. Install ChromeDriver manually (Linux)
+
+For **`--rip` / `--rp`**, or when **`webdriver-manager`** will not run. Match **`google-chrome --version`** on the Chrome host:
+
+```bash
+CHROME_VERSION=$(google-chrome --version | awk '{print $3}')
+cd /tmp
+wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip"
+unzip -o chromedriver-linux64.zip
+sudo install -m 755 chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
+chromedriver --version
+```
 
 ### Visible window (`--headed`)
 
@@ -251,18 +288,6 @@ chromedriver --version    # on the computer running the script
 - Sometimes the map behaves more reliably than in invisible mode.
 
 The script attaches to the Chrome you started; it does not open a second profile for you.
-
-### Install `chromedriver` manually (Linux)
-
-Often needed for `--rip` / `--rp` on the **script** machine:
-
-```bash
-CHROME_VERSION=$(google-chrome --version | awk '{print $3}')
-cd /tmp
-wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip"
-unzip -o chromedriver-linux64.zip
-sudo install -m 755 chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
-```
 
 ### Map load troubleshooting
 
