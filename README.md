@@ -14,10 +14,55 @@ Reservations in BC Parks typically open **three months ahead** at **7:00 Pacific
 ## Requirements
 
 - **Python 3.10+** (3.11 tested)
-- **Google Chrome** + matching ChromeDriver path (or let `webdriver-manager` fetch a driver for `reserve_site.py`)
+- **`monitor_site_api.py`:** no browser — only `requests`.
+- **`reserve_site.py`:** **Google Chrome** (stable) installed on the machine. ChromeDriver setup depends on how you run it (see below).
 - **Packages:** see `requirements.txt` (`requests`, `selenium`, `webdriver-manager`, optional `twilio`, `pyshorteners`, `pytz` for warmode)
 
 SMS is optional for both scripts.
+
+## Chrome and ChromeDriver (`reserve_site.py` only)
+
+### Headless (default): no manual ChromeDriver
+
+If you do **not** pass `--rip` / `--rp`, the script starts its own Chrome via Selenium and uses **[webdriver-manager](https://github.com/SergeyPirogov/webdriver_manager)** to download a **ChromeDriver** that matches your installed Chrome (cached under `~/.wdm`). You only need:
+
+1. **Google Chrome** installed (`google-chrome` / “Google Chrome” on PATH).
+2. Dependencies from `requirements.txt` (includes `webdriver-manager`).
+
+On the first run you may see a short delay while the driver is downloaded.
+
+### Remote Chrome (`--rip` / `--rp`): you must provide ChromeDriver
+
+When you attach to an **existing** Chrome with remote debugging, the script calls `webdriver.Chrome(options=…)` **without** webdriver-manager. Selenium then expects a **`chromedriver` executable on your `PATH`** (or in the usual install location), and that driver’s **major version must match** the Chrome you started manually.
+
+Check versions:
+
+```bash
+google-chrome --version          # or chromium --version
+chromedriver --version
+```
+
+If `chromedriver` is missing or mismatched:
+
+**Linux (Chrome for Testing — matches stable Chrome version):**
+
+```bash
+CHROME_VERSION=$(google-chrome --version | awk '{print $3}')
+cd /tmp
+wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip"
+unzip -o chromedriver-linux64.zip
+sudo install -m 755 chromedriver-linux64/chromedriver /usr/local/bin/chromedriver
+```
+
+Adjust the URL if Google changes hosting; the version string must match your Chrome.
+
+**macOS / Windows:** install Chrome, then download the **same major version** of ChromeDriver from [Chrome for Testing availability](https://googlechromelabs.github.io/chrome-for-testing/) (or your package manager), and put `chromedriver` on `PATH`.
+
+### If headless still fails
+
+- Confirm Chrome launches manually.
+- Upgrade packages: `pip install -U selenium webdriver-manager`.
+- Run with `--debug` and check whether the map loads; some environments need a display or different Chrome flags (outside the scope of this README).
 
 ## Setup
 
