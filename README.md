@@ -20,6 +20,7 @@ You do **not** need to have written any of this code to use it. Basic comfort wi
 - [Setup](#setup)
 - [Getting your booking link from the website](#getting-your-booking-link-from-the-website)
 - [Usage](#usage)
+- [Telegram bot (`reserve_site_v2.py`)](#telegram-bot-reserve_site_v2py)
 - [Chrome: invisible browser, visible window, or your own Chrome](#chrome-invisible-browser-visible-window-or-your-own-chrome)
 - [Policies and disclaimer](#policies-and-disclaimer)
 
@@ -31,7 +32,7 @@ You do **not** need to have written any of this code to use it. Basic comfort wi
 |------|----------------|
 | `monitor_site_api.py` | Checks availability only. Uses the park website’s public data in the background - **no separate browser window** opened by the script. Optional text-message alerts (Twilio). |
 | `reserve_site.py` | The main “try to Reserve” script: it can watch availability and drive an automated **Chrome** session to click the map and **Reserve** when conditions match. This is the script that has been **used and tested** here. |
-| [`reserve_site_v2.py`](#reserve_site_v2py-experimental--telegram) | **Work in progress.** Same idea as `reserve_site.py`, plus an optional **Telegram bot** so you could start jobs from your phone. **Not fully tested yet** - expect rough edges; prefer `reserve_site.py` for anything important. |
+| [`reserve_site_v2.py`](#telegram-bot-reserve_site_v2py) | **Work in progress.** Same reservation logic as `reserve_site.py`, plus an optional **Telegram bot** so allowed users can start jobs from a phone. Chrome still runs on the **Linux server** where the bot process runs. See [Telegram section](#telegram-bot-reserve_site_v2py). |
 | `requirements.txt` | List of Python packages to install (`pip install -r requirements.txt`). |
 
 For every command-line option and built-in examples:
@@ -133,36 +134,83 @@ Optional SMS (Twilio account required):
 
 ---
 
-### `reserve_site_v2.py` (experimental + Telegram)
+### Telegram bot (`reserve_site_v2.py`)
 
-**Status: work in progress.** This file adds an optional **Telegram bot** so you could start runs from chat. It is **not** fully tested or “production ready” yet. For real trips, use **`reserve_site.py`** until you’ve verified v2 yourself.
+**Status: work in progress.** Same automation as `reserve_site.py`, but you can **start and monitor jobs from Telegram**. The **browser still runs on the Linux machine** where `reserve_site_v2.py` is running (usually a server), not on your phone. For critical trips, many people still prefer **`reserve_site.py`** on the CLI until they trust v2.
 
-Planned idea (when stable):
+---
 
-- Run the bot on your server with `--telegram-bot`.
-- Allowed Telegram users send `/reserve` with the same URL and options you’d use on the command line, plus `/jobs`, `/status`, `/cancel`.
+#### If you only use Telegram (end user)
 
-Environment variables (for when you experiment):
+You need an **operator** who runs the bot on a server and adds your Telegram **numeric user ID** to the allowlist. You also need the **bot’s username or link** (for example `t.me/YourBotName`).
 
-```bash
-export TELEGRAM_BOT_TOKEN='123456:ABC...'
-export TELEGRAM_ALLOWED_USER_IDS='11111111,22222222'
-```
+1. **Open a private chat** with the bot in the Telegram app.
+2. Send **`/help`** - you should see commands. If you see **Unauthorized**, your user ID is not allowlisted; ask the operator to add you.
+3. **Get a booking link** the same way as for the CLI tools: on [Create booking](https://camping.bcparks.ca/create-booking/), search for park/dates, then on the **map / results** page copy the **full** `https://...` from the address bar. It must stay on **`camping.bcparks.ca`** and under **`/create-booking/`** (the bot rejects other URLs).
+4. **Start a job** - either:
+   - **`/reserve`** followed by the URL and optional flags (see below), or  
+   - Send a **single message** that is **only** that URL (starts a default normal-mode job).
+5. **While it runs**, the bot sends **status updates**. Routine messages (**who is available on the API**, **none of your `--f` sites free yet**, **waiting for the map**, etc.) are **not repeated** on every poll - you only get a new message when something **changes** or when something important happens (for example it starts trying the map, clicks **Reserve**, or errors). The first “still waiting” style message for a situation includes **how often it polls** and a **copy-paste line** ` /cancel <job_id> ` on its own line so you can stop the job from mobile.
+6. **Other commands** (allowlisted users only):
+   - **`/jobs`** - active and recent jobs  
+   - **`/status <job_id>`** - detail for one job  
+   - **`/cancel <job_id>`** - ask the server to stop that job (may take a moment)
 
-Proposed bot startup (experimental):
-
-```bash
-./reserve_site_v2.py --telegram-bot --max-concurrent 3
-```
-
-Example chat commands (for testing only):
+**Example messages** (wrap long URLs; site labels are examples):
 
 ```text
-/reserve https://camping.bcparks.ca/create-booking/results?... --f 29,11 --i 60 --debug
-/reserve https://... --warmode --f S51 --timezone US/Pacific
+/reserve https://camping.bcparks.ca/create-booking/results?resourceLocationId=...&mapId=... --f 29,11 --i 60
+/reserve https://camping.bcparks.ca/create-booking/results?... --warmode --f S51 --timezone US/Pacific
 /jobs
-/status ab12cd34
-/cancel ab12cd34
+/status a1b2c3d4
+/cancel a1b2c3d4
+```
+
+Use **`/reserve@BotName ...`** if Telegram inserts the bot name; that form is supported. Options match **`python3 reserve_site_v2.py --help`** (for example `--debug`, `--headed`, `--rip` / `--rp` if your operator sets that up).
+
+**Security (short):** Only **listed Telegram user IDs** can use the bot for real actions. Others get **Unauthorized**. The bot may still be **findable** in Telegram if someone knows the username; safety is the **allowlist**, not secrecy. Do not post your **bot token** anywhere.
+
+**Your numeric user ID** is **not** your `@username`. Ask the operator, or use a bot such as **`@userinfobot`** in Telegram to see your ID.
+
+---
+
+#### If you run the bot (server operator)
+
+**Environment variables** (required for `--telegram-bot`):
+
+```bash
+export TELEGRAM_BOT_TOKEN='...'        # from @BotFather - never log or commit
+export TELEGRAM_ALLOWED_USER_IDS='11111111,22222222'   # numeric IDs, comma-separated
+```
+
+**Optional:**
+
+```bash
+export CAMPSLINGER_AUDIT_LOG='/var/log/campslinger_audit.log'   # JSON lines: user_id, action, job_id, booking URL, etc.; default ./campslinger_telegram_audit.log
+```
+
+**Run:**
+
+```bash
+cd campslinger && source venv/bin/activate
+python3 reserve_site_v2.py --telegram-bot
+```
+
+**Useful flags:**
+
+| Flag | Meaning |
+|------|--------|
+| `--max-concurrent N` | Cap parallel reservation jobs (default **3**). |
+| `--no-terminal-log` | Stop printing job log lines on the **server terminal**; Telegram output is unchanged. |
+
+Keep the process running (**systemd**, **`tmux`**, etc.). If it exits, the bot stops responding.
+
+**Local operator notes:** A **`.env.local`** file in the repo (gitignored) can document variables and behavior for admins or tooling; the script does **not** auto-load it unless you **`source`** it in the shell or wire it into your service manager.
+
+**CLI without Telegram** - same as `reserve_site.py` style:
+
+```bash
+python3 reserve_site_v2.py --url 'https://camping.bcparks.ca/create-booking/...' --f 'S51' --i 60
 ```
 
 ---

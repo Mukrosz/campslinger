@@ -3,6 +3,7 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.local
 ss-*.png
 *.png
 campslinger_telegram_audit.log
