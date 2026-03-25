@@ -52,18 +52,16 @@ def set_log_callback(callback):
     _LOGGER_LOCAL.callback = callback
 
 
+def set_telegram_job_meta(job_id, interval_seconds):
+    """Per-job thread: job id and interval for /cancel footer on poll status messages."""
+    _LOGGER_LOCAL.telegram_job_id = job_id
+    _LOGGER_LOCAL.telegram_interval = int(interval_seconds)
+    _LOGGER_LOCAL.poll_digest = None
+
+
 def set_terminal_log_enabled(enabled):
     global _TERMINAL_LOG_ENABLED
     _TERMINAL_LOG_ENABLED = bool(enabled)
-
-
-def _emit_log(line):
-    callback = getattr(_LOGGER_LOCAL, "callback", None)
-    if callback:
-        try:
-            callback(line)
-        except Exception:
-            pass
 
 
 def _bot_console_line(message):
@@ -88,9 +86,47 @@ def current_time():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def pp(message, error=False):
+def _telegram_poll_footer():
+    jid = getattr(_LOGGER_LOCAL, "telegram_job_id", "") or ""
+    iv = getattr(_LOGGER_LOCAL, "telegram_interval", 60)
+    return (
+        "\n\nPolling every {}s. To stop this job, send:\n/cancel {}".format(iv, jid)
+    )
+
+
+def pp(message, error=False, telegram_digest=None):
+    """
+    Log a line. If telegram_digest is a tuple, Telegram mirror is sent only when the
+    digest changes (dedupe routine poll status). Some digest kinds append a /cancel
+    footer (zero, filter_miss, no_pick, map_wait). telegram_digest None = always
+    mirror to Telegram (if callback).
+    """
     line = "{} - {}".format(current_time(), message)
-    _emit_log(line)
+    callback = getattr(_LOGGER_LOCAL, "callback", None)
+    if callback:
+        send_telegram = True
+        if telegram_digest is not None:
+            last = getattr(_LOGGER_LOCAL, "poll_digest", object())
+            if last == telegram_digest:
+                send_telegram = False
+            else:
+                _LOGGER_LOCAL.poll_digest = telegram_digest
+        if send_telegram:
+            text = line
+            if telegram_digest is not None and telegram_digest[0] in (
+                "zero",
+                "filter_miss",
+                "no_pick",
+                "map_wait",
+            ):
+                text += _telegram_poll_footer()
+            try:
+                callback(text)
+            except Exception:
+                pass
+    else:
+        if telegram_digest is not None:
+            _LOGGER_LOCAL.poll_digest = telegram_digest
     if error:
         sys.exit(line)
     if _TERMINAL_LOG_ENABLED:
@@ -410,7 +446,10 @@ def reserve_normal_mode(
         try:
             sites = bcparks_fetch_sites_map(url)
         except Exception as e:
-            pp("❌ API poll failed: {}".format(e))
+            pp(
+                "❌ API poll failed: {}".format(e),
+                telegram_digest=("api_err", str(e)[:220]),
+            )
             if stop_event and stop_event.wait(interval):
                 pp("🛑 Cancellation requested")
                 return ""
@@ -420,10 +459,11 @@ def reserve_normal_mode(
         avail = api_available_labels(sites)
         if avail:
             pp(
-                "✨ Available sites (API): {}".format(",".join(avail))
+                "✨ Available sites (API): {}".format(",".join(avail)),
+                telegram_digest=("avail", frozenset(avail)),
             )
         else:
-            pp("❌ No Availability (API)")
+            pp("❌ No Availability (API)", telegram_digest=("zero",))
             if stop_event and stop_event.wait(interval):
                 pp("🛑 Cancellation requested")
                 return ""
@@ -435,12 +475,16 @@ def reserve_normal_mode(
             if requested_sites:
                 pp(
                     "❌ None of your preferred sites are free (API). "
-                    "Prefer: {} — currently available listed above.".format(
+                    "Prefer: {} - currently available listed above.".format(
                         ",".join(requested_sites)
-                    )
+                    ),
+                    telegram_digest=("filter_miss", frozenset(avail)),
                 )
             else:
-                pp("❌ Could not pick a target site (API); retrying…")
+                pp(
+                    "❌ Could not pick a target site (API); retrying…",
+                    telegram_digest=("no_pick",),
+                )
             if stop_event and stop_event.wait(interval):
                 pp("🛑 Cancellation requested")
                 return ""
@@ -456,7 +500,8 @@ def reserve_normal_mode(
         if target not in on_map:
             pp(
                 "⚠️  API shows {} but map has no matching available icon yet; "
-                "waiting {}s…".format(label, interval)
+                "waiting {}s…".format(label, interval),
+                telegram_digest=("map_wait", label),
             )
             if stop_event and stop_event.wait(interval):
                 pp("🛑 Cancellation requested")
@@ -489,7 +534,10 @@ def reserve_normal_mode(
             except Exception as e:
                 pp("❌ Failed to click reserve button: {}".format(e))
         else:
-            pp("❌ Could not prepare reservation")
+            pp(
+                "❌ Could not prepare reservation",
+                telegram_digest=("prep_fail", label),
+            )
 
         if stop_event and stop_event.wait(interval):
             pp("🛑 Cancellation requested")
@@ -873,6 +921,7 @@ def _run_job(job, manager, bot, loop):
         _send_telegram_text(bot, loop, job.chat_id, line)
 
     set_log_callback(_tg)
+    set_telegram_job_meta(job.job_id, job.args.interval)
     args = job.args
     client = None
     if args.sms:
