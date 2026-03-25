@@ -2,6 +2,12 @@
 
 Small Python helpers for **BC Parks** camping at [camping.bcparks.ca](https://camping.bcparks.ca/create-booking/): watch availability via the site’s JSON API, and optionally drive the booking map in Chrome to place a cart **hold** (then finish checkout in the browser yourself).
 
+## Platform
+
+**Supported and tested: Debian Linux** (e.g. Debian 12), on a laptop or server with Google Chrome where you intend to run `reserve_site.py`.
+
+**Windows and macOS are not tested** and are **not a priority** right now; things might work, but instructions here target Linux. If you need first-class support elsewhere later, open an issue or PR.
+
 ## Scripts
 
 | Script | What it does |
@@ -13,7 +19,7 @@ Reservations in BC Parks typically open **three months ahead** at **7:00 Pacific
 
 ## Requirements
 
-- **Python 3.10+** (3.11 tested)
+- **Python 3.10+** (3.10 / 3.11 tested on Debian)
 - **`monitor_site_api.py`:** no browser — only `requests`.
 - **`reserve_site.py`:** **Google Chrome** (stable) installed on the machine. ChromeDriver setup depends on how you run it (see below).
 - **Packages:** see `requirements.txt` (`requests`, `selenium`, `webdriver-manager`, optional `twilio`, `pyshorteners`, `pytz` for warmode)
@@ -26,7 +32,7 @@ SMS is optional for both scripts.
 
 If you do **not** pass `--rip` / `--rp`, the script starts its own Chrome via Selenium and uses **[webdriver-manager](https://github.com/SergeyPirogov/webdriver_manager)** to download a **ChromeDriver** that matches your installed Chrome (cached under `~/.wdm`). You only need:
 
-1. **Google Chrome** installed (`google-chrome` / “Google Chrome” on PATH).
+1. **Google Chrome** stable for Linux (`google-chrome` on `PATH`; install from [Google’s .deb repo](https://www.google.com/chrome/linux/) on Debian/Ubuntu if needed).
 2. Dependencies from `requirements.txt` (includes `webdriver-manager`).
 
 On the first run you may see a short delay while the driver is downloaded.
@@ -56,8 +62,6 @@ sudo install -m 755 chromedriver-linux64/chromedriver /usr/local/bin/chromedrive
 
 Adjust the URL if Google changes hosting; the version string must match your Chrome.
 
-**macOS / Windows:** install Chrome, then download the **same major version** of ChromeDriver from [Chrome for Testing availability](https://googlechromelabs.github.io/chrome-for-testing/) (or your package manager), and put `chromedriver` on `PATH`.
-
 ### If headless still fails
 
 - Confirm Chrome launches manually.
@@ -70,7 +74,7 @@ Adjust the URL if Google changes hosting; the version string must match your Chr
 git clone https://github.com/Mukrosz/campslinger.git
 cd campslinger
 python3 -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
