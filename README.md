@@ -26,9 +26,12 @@ Subsections under **Usage** and **Chrome** cover each script, flags, remote atta
 |------|---------|
 | `monitor_site_api.py` | Availability only (HTTP). Optional SMS. **No browser.** |
 | `reserve_site.py` | API + Selenium (normal) or Selenium-only (warmode). See below. |
+| `reserve_site_v2.py` | `reserve_site.py` behavior plus Telegram bot control mode (long polling, multi-job). |
 | `requirements.txt` | Python dependencies. |
 
-Full flag list, defaults, and examples: `python3 reserve_site.py --help`.
+Full flag lists, defaults, and examples:
+- `python3 reserve_site.py --help`
+- `python3 reserve_site_v2.py --help`
 
 ---
 
@@ -125,6 +128,38 @@ Uses `--timezone` (default `US/Pacific`) for 07:00 / prefetch. No API calls.
 |------|--------|
 | `--headed` | Visible Chrome window (needs a display). Still a separate automated Chrome, not your daily profile—unless you use remote attach. |
 | `--debug` | Extra logging; on map failure writes `reserve_map_failure.html` and `reserve_map_failure.png` in the working directory. |
+
+### reserve_site_v2.py (Telegram-enabled)
+
+`reserve_site_v2.py` keeps CLI usage compatible with `reserve_site.py` and adds:
+
+- `--telegram-bot` to run a Telegram long-polling control loop.
+- `--max-concurrent` (default `3`) to cap concurrent reservation jobs started from chat.
+- Job commands: `/reserve`, `/jobs`, `/status`, `/cancel`, `/help`.
+- Optional convenience: sending a plain booking URL in chat starts a default normal-mode job.
+
+Telegram bot environment variables (required):
+
+```bash
+export TELEGRAM_BOT_TOKEN='123456:ABC...'
+export TELEGRAM_ALLOWED_USER_IDS='11111111,22222222'
+```
+
+Run bot mode:
+
+```bash
+./reserve_site_v2.py --telegram-bot --max-concurrent 3
+```
+
+Command examples in Telegram:
+
+```text
+/reserve https://camping.bcparks.ca/create-booking/results?... --f 29,11 --i 60 --debug
+/reserve https://... --warmode --f S51 --timezone US/Pacific
+/jobs
+/status ab12cd34
+/cancel ab12cd34
+```
 
 ---
 
