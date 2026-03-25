@@ -947,7 +947,7 @@ def telegram_help_text():
     )
 
 
-async def run_telegram_bot(args):
+def run_telegram_bot(args):
     from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -959,7 +959,6 @@ async def run_telegram_bot(args):
     allowed_user_ids = {int(x.strip()) for x in allowed_raw.split(",") if x.strip()}
     manager = JobManager(max_concurrent=args.max_concurrent)
     app = ApplicationBuilder().token(token).build()
-    loop = asyncio.get_running_loop()
 
     def authorized(update):
         return update.effective_user and update.effective_user.id in allowed_user_ids
@@ -982,6 +981,7 @@ async def run_telegram_bot(args):
                 "Server busy: max {} concurrent jobs reached.".format(manager.max_concurrent)
             )
             return
+        loop = asyncio.get_running_loop()
         t = threading.Thread(target=_run_job, args=(job, manager, app.bot, loop), daemon=True)
         job.thread = t
         t.start()
@@ -1074,14 +1074,14 @@ async def run_telegram_bot(args):
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     print("{} - Telegram bot started (long polling). max_concurrent={}".format(current_time(), manager.max_concurrent))
-    await app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True)
 
 
 def main():
     args = build_arg_parser().parse_args()
 
     if args.telegram_bot:
-        asyncio.run(run_telegram_bot(args))
+        run_telegram_bot(args)
         return
 
     if not args.url:
