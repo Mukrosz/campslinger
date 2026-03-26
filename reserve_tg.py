@@ -147,9 +147,11 @@ def current_time():
 
 def _telegram_poll_footer():
     iv = getattr(_LOGGER_LOCAL, "telegram_interval", 60)
+    jid = getattr(_LOGGER_LOCAL, "telegram_job_id", "") or ""
+    cancel_line = "/cancel {}".format(jid) if jid else "/cancel"
     return (
-        "\n\nPolling every {}s. To stop this job use respective Cancel button above or send:\n/cancel <job_id>".format(
-            iv
+        "\n\nPolling every {}s. To stop this job use respective Cancel button above or send:\n{}".format(
+            iv, cancel_line
         )
     )
 
