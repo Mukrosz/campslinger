@@ -1273,7 +1273,7 @@ def run_telegram_bot(args):
         cid = update.effective_chat.id
         await context.bot.send_message(
             chat_id=cid,
-            text="Job {} — quick actions while it runs:".format(job.job_id),
+            text="Job {} - quick actions while it runs:".format(job.job_id),
             reply_markup=_job_control_keyboard(job.job_id),
         )
 

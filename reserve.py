@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 BC Parks reservation helper: API polling (normal mode) + Selenium for map / Reserve.
-Warmode uses Selenium only — prefetch at T-1 minute, click Reserve at 7:00 (no API calls).
+Warmode uses Selenium only - prefetch at T-1 minute, click Reserve at 7:00 (no API calls).
 """
 
 import argparse
@@ -377,7 +377,7 @@ def reserve_normal_mode(driver, url, requested_sites, interval, debug=False):
             if requested_sites:
                 pp(
                     "❌ None of your preferred sites are free (API). "
-                    "Prefer: {} — currently available listed above.".format(
+                    "Prefer: {} - currently available listed above.".format(
                         ",".join(requested_sites)
                     )
                 )
