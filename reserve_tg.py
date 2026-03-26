@@ -805,6 +805,35 @@ class JobManager:
         with self._lock:
             return list(self.recent)[:count]
 
+    def get_for_user(self, job_id, user_id):
+        """Return job if it exists and belongs to user_id; else None (no leak of other users' jobs)."""
+        job = self.get(job_id)
+        if not job or job.user_id != user_id:
+            return None
+        return job
+
+    def list_active_for_user(self, user_id):
+        with self._lock:
+            return [j for j in self.active.values() if j.user_id == user_id]
+
+    def list_recent_for_user(self, user_id, count=10):
+        with self._lock:
+            out = []
+            for job in self.recent:
+                if job.user_id == user_id:
+                    out.append(job)
+                    if len(out) >= count:
+                        break
+            return out
+
+    def cancel_for_user(self, job_id, user_id):
+        with self._lock:
+            job = self.active.get(job_id)
+            if not job or job.user_id != user_id:
+                return False
+            job.stop_event.set()
+            return True
+
 
 def build_telegram_arg_parser():
     p = argparse.ArgumentParser(
@@ -1278,10 +1307,10 @@ def run_telegram_bot(args):
             reply_markup=_job_control_keyboard(job.job_id),
         )
 
-    def _format_status_text(jid):
-        job = manager.get(jid)
+    def _format_status_text(jid, requester_user_id):
+        job = manager.get_for_user(jid, requester_user_id)
         if not job:
-            return "Job {} not found".format(jid)
+            return "Job not found or not yours."
         return "job={} status={} started={} ended={} result={} error={}".format(
             job.job_id,
             job.status,
@@ -1341,8 +1370,8 @@ def run_telegram_bot(args):
         uid = update.effective_user.id if update.effective_user else None
         _bot_console_line("/jobs user={}".format(uid if uid is not None else "?"))
         audit_log("command_jobs", user_id=uid, chat_id=update.effective_chat.id if update.effective_chat else None)
-        active = manager.list_active()
-        recent = manager.list_recent(10)
+        active = manager.list_active_for_user(uid)
+        recent = manager.list_recent_for_user(uid, 10)
         lines = ["Active jobs: {}".format(len(active))]
         for job in active:
             lines.append("- {} status={} started={}".format(job.job_id, job.status, job.started_at))
@@ -1366,7 +1395,7 @@ def run_telegram_bot(args):
             await _tg_reply(update, "Usage: /status <job_id>")
             return
         jid = context.args[0].strip()
-        job = manager.get(jid)
+        job = manager.get_for_user(jid, uid)
         audit_log(
             "command_status",
             user_id=uid,
@@ -1374,7 +1403,7 @@ def run_telegram_bot(args):
             job_id=jid,
             found=job is not None,
         )
-        await _tg_reply(update, _format_status_text(jid))
+        await _tg_reply(update, _format_status_text(jid, uid))
 
     async def cancel_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -1387,7 +1416,7 @@ def run_telegram_bot(args):
             await _tg_reply(update, "Usage: /cancel <job_id>")
             return
         jid = context.args[0].strip()
-        ok = manager.cancel(jid)
+        ok = manager.cancel_for_user(jid, uid)
         audit_log(
             "command_cancel",
             user_id=uid,
@@ -1399,7 +1428,7 @@ def run_telegram_bot(args):
             _bot_console_line("/cancel {} user={}".format(jid, uid if uid is not None else "?"))
             await _tg_reply(update, "Cancellation requested for {}".format(jid))
         else:
-            await _tg_reply(update, "Job {} not active".format(jid))
+            await _tg_reply(update, "Job {} not active or not yours".format(jid))
 
     async def text_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -1420,15 +1449,21 @@ def run_telegram_bot(args):
             jid = txt.split()[0].strip()
             if pend == "status":
                 context.user_data.pop(UD_PENDING, None)
-                audit_log("command_status", user_id=uid, chat_id=cid, job_id=jid, found=manager.get(jid) is not None)
-                await _tg_reply(update, _format_status_text(jid))
+                audit_log(
+                    "command_status",
+                    user_id=uid,
+                    chat_id=cid,
+                    job_id=jid,
+                    found=manager.get_for_user(jid, uid) is not None,
+                )
+                await _tg_reply(update, _format_status_text(jid, uid))
                 return
             context.user_data.pop(UD_PENDING, None)
-            ok = manager.cancel(jid)
+            ok = manager.cancel_for_user(jid, uid)
             audit_log("command_cancel", user_id=uid, chat_id=cid, job_id=jid, accepted=ok)
             await _tg_reply(
                 update,
-                "Cancellation requested for {}".format(jid) if ok else "Job {} not active".format(jid),
+                "Cancellation requested for {}".format(jid) if ok else "Job {} not active or not yours".format(jid),
             )
             return
 
@@ -1567,10 +1602,10 @@ def run_telegram_bot(args):
         if data.startswith("j:c:"):
             await ack()
             jid = data[4:].strip()
-            ok = manager.cancel(jid)
+            ok = manager.cancel_for_user(jid, uid)
             audit_log("command_cancel", user_id=uid, chat_id=cid, job_id=jid, accepted=ok)
             await q.message.reply_text(
-                "Cancellation requested for {}".format(jid) if ok else "Job {} not active".format(jid)
+                "Cancellation requested for {}".format(jid) if ok else "Job {} not active or not yours".format(jid)
             )
             return
         if data.startswith("j:s:"):
@@ -1581,9 +1616,9 @@ def run_telegram_bot(args):
                 user_id=uid,
                 chat_id=cid,
                 job_id=jid,
-                found=manager.get(jid) is not None,
+                found=manager.get_for_user(jid, uid) is not None,
             )
-            await q.message.reply_text(_format_status_text(jid))
+            await q.message.reply_text(_format_status_text(jid, uid))
             return
         if data == "j:l":
             await ack()

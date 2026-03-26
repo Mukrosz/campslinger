@@ -351,6 +351,8 @@ Put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` in `telegram.env` with 
 
 **Who can use it:** only user IDs on the operator’s allowlist. Others see **Unauthorized**.
 
+**Your jobs only:** `/jobs`, `/status`, `/cancel`, and the **Cancel** / **Status** buttons only list or act on jobs **you** started (private chats; each user’s job ids are isolated from other allowlisted users). The server still enforces a single global `--max-concurrent` pool across everyone.
+
 **Help:** send **`/help`**. You should see **Campslinger Telegram commands** and a **Quick actions** keyboard (`/jobs`, `/status`, `/cancel`, `/reserve`, `/help`).
 
 **Quick action buttons**
@@ -376,6 +378,7 @@ When the API returns a resolvable park name, log lines mirrored to Telegram are 
 ### reserve_tg.py: security notes
 
 - Safety is the **numeric allowlist**, not hiding the bot username.  
+- Job control is **per Telegram user id**: you cannot see or cancel another person’s jobs (private chat use is assumed).  
 - Never share the **bot token**; revoke in BotFather if leaked.  
 - Audit log path should be restricted on disk in production.
 
