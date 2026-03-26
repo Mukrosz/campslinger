@@ -236,7 +236,7 @@ sudo install -m 755 chromedriver-linux64/chromedriver /usr/local/bin/chromedrive
 chromedriver --version
 ```
 
-#### Remote debugging (your own Chrome)
+#### Remote controlled Chrome browser
 
 On the machine with the screen:
 
@@ -333,7 +333,20 @@ python3 reserve_tg.py
 
 Keep it running with **systemd**, **tmux**, or similar. If the process exits, the bot stops.
 
-7. **Optional: systemd sketch**
+7. **Optional: run with remote Chrome attach (`--rip` / `--rp`)** (operator only)
+
+   Start Chrome on the machine where you want the real, logged-in browser session, with remote debugging enabled (see [Remote controlled Chrome browser](#remote-controlled-chrome-browser)).
+
+   Then start the bot process like:
+
+```bash
+cd campslinger && source venv/bin/activate
+python3 reserve_tg.py --rip 192.168.1.50 --rp 9222
+```
+
+   `--rip/--rp` must point to a Chrome that is reachable on the **same LAN** as the bot host.
+
+8. **Optional: systemd sketch**
 
 ```ini
 [Service]
