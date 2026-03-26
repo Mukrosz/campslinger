@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 Campslinger Telegram bot (reserve_tg.py): allowlisted users start BC Parks reservation
-jobs from Telegram. Chrome runs headless on the server. Same core automation as reserve.py
-(API polling + Selenium map / Reserve); this entrypoint is Telegram-only (no standalone CLI).
+jobs from Telegram. By default Chrome runs headless on the server where the bot runs.
+The operator may start this process with --rip / --rp to attach to an existing Chrome
+with remote debugging (same LAN as the server; not exposed in Telegram). Same core
+automation as reserve.py (API polling + Selenium map / Reserve); no standalone one-shot
+CLI like reserve.py --url.
 """
 
 import argparse
@@ -52,6 +55,8 @@ BCPARKS_HEADERS = {
 _LOGGER_LOCAL = threading.local()
 # When False, pp() skips print() (Telegram bot mode with --no-terminal-log).
 _TERMINAL_LOG_ENABLED = True
+# (host, port) when the bot process was started with --rip and --rp; else None.
+_REMOTE_CHROME = None
 _audit_lock = threading.Lock()
 _audit_write_warned = False
 
@@ -378,6 +383,28 @@ def setup_webdriver():
         return driver
     except WebDriverException as e:
         pp("❌ WebDriver failed to start: {}".format(e))
+        return None
+
+
+def setup_webdriver_remote(ip, port):
+    """
+    Attach to Chrome started with --remote-debugging-port (operator-only; same LAN as server).
+    ChromeDriver on PATH must match the Chrome major version.
+    """
+    options = Options()
+    options.add_experimental_option("debuggerAddress", "{}:{}".format(ip, port))
+    try:
+        driver = webdriver.Chrome(options=options)
+        driver.set_page_load_timeout(120)
+        try:
+            driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+        except Exception:
+            pass
+        return driver
+    except WebDriverException as e:
+        pp("❌ Failed to connect to existing Chrome instance: {}".format(e))
         return None
 
 
@@ -861,6 +888,27 @@ def build_telegram_arg_parser():
         default=True,
         help="Do not print job lines to the server terminal.",
     )
+    p.add_argument(
+        "--rip",
+        "--remote_ip",
+        dest="remote_ip",
+        default=None,
+        metavar="HOST",
+        help=(
+            "Operator only: attach to Chrome remote debugging on this host. "
+            "Must be reachable on the LAN where this bot runs (not a Telegram option). "
+            "Use with --rp."
+        ),
+    )
+    p.add_argument(
+        "--rp",
+        "--remote_port",
+        dest="remote_port",
+        type=int,
+        default=None,
+        metavar="PORT",
+        help="Operator only: remote debugging port (e.g. 9222). Use with --rip.",
+    )
     return p
 
 
@@ -1087,7 +1135,10 @@ def _run_job(job, manager, bot, loop):
             set_log_callback(None)
             return
 
-    driver = setup_webdriver()
+    if _REMOTE_CHROME:
+        driver = setup_webdriver_remote(_REMOTE_CHROME[0], _REMOTE_CHROME[1])
+    else:
+        driver = setup_webdriver()
     if not driver:
         _send_telegram_text(bot, loop, job.chat_id, "❌ WebDriver initialization failed")
         manager.mark_done(job.job_id, "error", error="webdriver_init_failed")
@@ -1226,6 +1277,23 @@ def run_telegram_bot(args):
     )
 
     set_terminal_log_enabled(args.terminal_log)
+
+    global _REMOTE_CHROME
+    rip = (args.remote_ip or "").strip() if args.remote_ip else ""
+    rp = args.remote_port
+    if bool(rip) != (rp is not None):
+        raise RuntimeError(
+            "Remote Chrome requires both --rip and --rp (or neither for headless server Chrome)."
+        )
+    if rip and rp is not None:
+        _REMOTE_CHROME = (rip, int(rp))
+        _bot_console_line(
+            "Using remote Chrome at {}:{} (same LAN as this server; not set from Telegram)".format(
+                _REMOTE_CHROME[0], _REMOTE_CHROME[1]
+            )
+        )
+    else:
+        _REMOTE_CHROME = None
 
     # TELEGRAM_BOT_TOKEN must never be logged, written to audit_log, or echoed to users.
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -1825,11 +1893,18 @@ def run_telegram_bot(args):
         "bot_start",
         max_concurrent=manager.max_concurrent,
         terminal_log=args.terminal_log,
+        remote_chrome="{}:{}".format(_REMOTE_CHROME[0], _REMOTE_CHROME[1])
+        if _REMOTE_CHROME
+        else None,
         audit_log_path=(os.getenv("CAMPSLINGER_AUDIT_LOG") or "campslinger_telegram_audit.log").strip(),
     )
     _bot_console_line(
-        "Telegram bot started (long polling). max_concurrent={} terminal_log={}".format(
-            manager.max_concurrent, args.terminal_log
+        "Telegram bot started (long polling). max_concurrent={} terminal_log={}{}".format(
+            manager.max_concurrent,
+            args.terminal_log,
+            " remote_chrome={}:{}".format(_REMOTE_CHROME[0], _REMOTE_CHROME[1])
+            if _REMOTE_CHROME
+            else "",
         )
     )
     app.run_polling(drop_pending_updates=True)
