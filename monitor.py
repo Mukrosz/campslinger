@@ -121,18 +121,18 @@ if __name__ == '__main__':
     from twilio.rest import Client
 
     description = ("This script monitors available campsites based on the provided URL \n"
-                   "For full README, check https://github.com/Mukrosz/parks \n"
+                   "For full README, check https://github.com/Mukrosz/campslinger \n"
                    " ---< Examples >--- \n"
                    "Check for site availability : \n"
-                   "  ./query_site_v2.py --u 'https://camping.bcparks.ca/create-booking...'  \n\n" 
+                   "  ./monitor.py --u 'https://camping.bcparks.ca/create-booking...'  \n\n"
                    "Check for site availability for specific sites : \n"
-                   "  ./query_site_v2.py --u 'https://camping.bcparks.ca/create-booking...' --f '10,92,S18,S32B'  \n\n" 
+                   "  ./monitor.py --u 'https://camping.bcparks.ca/create-booking...' --f '10,92,S18,S32B'  \n\n"
                    "Check for site availability and get and sms notification (check twilio_* arguments): \n"
-                   "  ./query_site_v2.py --u 'https://camping.bcparks.ca/create-booking...' --s \n\n"
+                   "  ./monitor.py --u 'https://camping.bcparks.ca/create-booking...' --s \n\n"
                    "Check for site availability every 30s insead the default 60s: \n"
-                   "  ./query_site_v2.py --u 'https://camping.bcparks.ca/create-booking...' --s --i 30 \n\n"
+                   "  ./monitor.py --u 'https://camping.bcparks.ca/create-booking...' --s --i 30 \n\n"
                    "Get an SMS notification when a site becomes available (requires Twilio account): \n"
-                   "  ./query_site_v2.py --u 'https://camping.bcparks.ca/create-booking...' --s --i 30 \\\n"
+                   "  ./monitor.py --u 'https://camping.bcparks.ca/create-booking...' --s --i 30 \\\n"
                    "                  --twilio_sid X --twilio_auth_token X --twilio_number X \\\n"
                    "                  --my_phone_number X \n\n")
     parser = argparse.ArgumentParser(description     = description,

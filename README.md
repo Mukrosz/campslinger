@@ -1,69 +1,52 @@
 # campslinger
 
-**What this is**
+Small helpers for **[BC Parks frontcountry booking](https://camping.bcparks.ca/create-booking/)** on **Linux** (Debian-style): watch availability, optionally drive Chrome to click **Reserve**, or run a **Telegram bot** so allowed users can start jobs from a phone (browser still on the server).
 
-This repository is a small helper project for people who book frontcountry camping on **[BC Parks’ online reservation site](https://camping.bcparks.ca/create-booking/)**. It was built for personal use on **Linux** (Debian-style systems):
-
-- **Watch** whether campsites are free (without clicking around the map every minute).
-- **Optionally try to put a site in your cart** (“Reserve”) when something matches what you want - then you finish payment and details yourself in the normal website checkout.
-
-You do **not** need to have written any of this code to use it. Basic comfort with a terminal (running commands), copying a URL from your browser, and installing Python helps.
-
-**Platform:** Tested on **Debian Linux** (e.g. Debian 12). This README does not cover Windows or macOS.
+**Platform:** Tested on Debian Linux (e.g. Debian 12). This README does not cover Windows or macOS.
 
 ---
 
-## Contents
+## Main contents
 
-- [Repository layout](#repository-layout)
-- [What each script does (plain English)](#what-each-script-does-plain-english)
-- [Setup](#setup)
-- [Getting your booking link from the website](#getting-your-booking-link-from-the-website)
-- [Usage](#usage)
-- [Telegram bot (`reserve_site_v2.py`)](#telegram-bot-reserve_site_v2py)
-- [Chrome: invisible browser, visible window, or your own Chrome](#chrome-invisible-browser-visible-window-or-your-own-chrome)
-- [Policies and disclaimer](#policies-and-disclaimer)
+| Section | What you get |
+|---------|----------------|
+| [Shared (all scripts)](#shared-all-scripts) | Clone, virtualenv, packages, booking URL |
+| [monitor.py](#monitorpy) | Poll the public API for availability only (no browser) |
+| [reserve.py](#reservepy) | API + Chrome to reserve when sites match |
+| [reserve_tg.py](#reserve_tgpy) | Telegram bot around the same automation as `reserve.py` |
+| [Policies and disclaimer](#policies-and-disclaimer) | Holds, rate limits, not affiliated |
 
----
-
-## Repository layout
-
-| File | What it’s for |
-|------|----------------|
-| `monitor_site_api.py` | Checks availability only. Uses the park website’s public data in the background - **no separate browser window** opened by the script. Optional text-message alerts (Twilio). |
-| `reserve_site.py` | The main “try to Reserve” script: it can watch availability and drive an automated **Chrome** session to click the map and **Reserve** when conditions match. This is the script that has been **used and tested** here. |
-| [`reserve_site_v2.py`](#telegram-bot-reserve_site_v2py) | **Work in progress.** Same reservation logic as `reserve_site.py`, plus an optional **Telegram bot** so allowed users can start jobs from a phone. Chrome still runs on the **Linux server** where the bot process runs. See [Telegram section](#telegram-bot-reserve_site_v2py). |
-| `requirements.txt` | List of Python packages to install (`pip install -r requirements.txt`). |
-
-For every command-line option and built-in examples:
-
-- `python3 reserve_site.py --help`
-- `python3 reserve_site_v2.py --help`
+Jump to a script, follow its **Section contents** links, then setup and usage there.
 
 ---
 
-## What each script does (plain English)
+## Shared (all scripts)
 
-### `monitor_site_api.py`
+### Shared: section contents
 
-You give it the **same long URL** you see on the BC Parks results/map page after you search. The script asks the booking system, in the background, which sites are available and prints a simple answer (and can text you if you set up Twilio). It **does not** open a map or click anything.
+- [What ships in the repo](#what-ships-in-the-repo)
+- [One-time setup: clone, venv, dependencies](#one-time-setup-clone-venv-dependencies)
 
-### `reserve_site.py`
+### What ships in the repo
 
-Two behaviors:
+| File | Role |
+|------|------|
+| `monitor.py` | Availability checks via the site’s JSON API; optional Twilio SMS. |
+| `reserve.py` | Watches availability and uses **Chrome** to open the map and click **Reserve** when filters match. |
+| `reserve_tg.py` | **Telegram-only** process: same reservation engine as `reserve.py`, controlled from chat. |
+| `requirements.txt` | `pip install -r requirements.txt` |
 
-| Mode | In simple terms |
-|------|------------------|
-| **Normal (default)** | Every so often (e.g. every 60 seconds), the script quietly checks **which site numbers are free**. When one you care about is free, it opens an automated Chrome, finds that site on the **map** (green “available” marker), and clicks **Reserve** so the site lands in the cart/hold - **you still complete checkout on the website.** |
-| **Warmode (`--warmode`)** | For the “opens at 7 a.m. Pacific” style window: about a minute before 7, it loads the map and prepares the **Reserve** step, then clicks at 7. No background “availability check” loop for that mode - see BC Parks’ own rules for how far ahead you can book. |
+Inline help:
 
-**Why two steps?** In normal mode, the quick background check saves constantly loading the full map; the script only uses the full map when it’s time to click. Official booking rules (how far ahead, 7 a.m. Pacific, etc.) are on **[BC Parks  -  Frontcountry camping](https://bcparks.ca/reservations/frontcountry-camping/)**.
+```bash
+python3 monitor.py --help
+python3 reserve.py --help
+python3 reserve_tg.py --help
+```
 
----
+### One-time setup: clone, venv, dependencies
 
-## Setup
-
-You need **Python 3.10 or newer** and a terminal on your Linux machine.
+You need **Python 3.10+** and a terminal.
 
 ```bash
 git clone https://github.com/Mukrosz/campslinger.git
@@ -73,167 +56,133 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-The `venv/` folder is only on your computer and is **not** part of the GitHub repo.
+The `venv/` directory stays local and is not committed.
 
----
+### Booking URL (used by every script)
 
-## Getting your booking link from the website
+1. Open **[Create booking](https://camping.bcparks.ca/create-booking/)**, choose park, dates, equipment, search.
+2. On the **map / results** page, copy the **full** address bar URL.
 
-1. Go to **[Create booking](https://camping.bcparks.ca/create-booking/)**, pick park, dates, equipment, and run a search.
-2. When you see the **map / results** page, copy the **entire** address bar URL. The scripts need the long URL that includes things like dates and map identifiers.
-
-Example shape (your link will be different):
+Example shape (yours will differ):
 
 ```text
-https://camping.bcparks.ca/create-booking/results?resourceLocationId=...&mapId=...&startDate=2025-08-18&endDate=2025-08-25&...
+https://camping.bcparks.ca/create-booking/results?resourceLocationId=...&mapId=...&startDate=...&endDate=...&...
 ```
 
-Pass that string to the scripts as `--url` or `--u`.
+Pass it as `--url` / `--u` (or paste/send it in Telegram for the bot).
 
 ---
 
-## Usage
+## monitor.py
 
-### `monitor_site_api.py`
+### monitor.py: section contents
+
+- [What it does](#monitorpy-what-it-does)
+- [Prerequisites](#monitorpy-prerequisites)
+- [Installation / setup](#monitorpy-installation--setup)
+- [Usage](#monitorpy-usage)
+- [Optional SMS (Twilio)](#monitorpy-optional-sms-twilio)
+
+### monitor.py: what it does
+
+You give it the same long results URL as the other tools. It repeatedly queries the booking system’s **public API** and prints which sites are available. It **does not** open a browser or click the map.
+
+### monitor.py: prerequisites
+
+- Shared [venv and dependencies](#one-time-setup-clone-venv-dependencies).
+- No Chrome required.
+
+### monitor.py: installation / setup
+
+Activate the venv (see shared setup). No extra services.
+
+### monitor.py: usage
 
 ```bash
-./monitor_site_api.py --url 'https://camping.bcparks.ca/create-booking/...'
-./monitor_site_api.py --url '...' --f 'S51,S52' --i 30
+./monitor.py --url 'https://camping.bcparks.ca/create-booking/...'
+./monitor.py --url '...' --f 'S51,S52' --i 30
 ```
 
-Optional SMS (Twilio account required):
+`--f` limits which site labels you care about; `--i` is the poll interval in seconds (default 60).
+
+### monitor.py: optional SMS (Twilio)
+
+Requires a Twilio account and the `twilio` package (included in `requirements.txt` if you install the full file).
 
 ```bash
-./monitor_site_api.py --url '...' --f 'S51' --sms --i 60 \
+./monitor.py --url '...' --f 'S51' --sms --i 60 \
   --twilio_sid … --twilio_auth_token … --twilio_number … --my_phone_number …
 ```
 
-### `reserve_site.py`
-
-**Normal mode** (check in the background, then try Reserve when something matches):
-
-```bash
-./reserve_site.py --url 'https://camping.bcparks.ca/create-booking/...'
-./reserve_site.py --url '...' --f 'S51,S52' --i 60
-```
-
-- `--f` is a comma-separated list of site labels you prefer. **Order matters:** the script tries your first choice that is actually free, then the next, etc.
-
-**Warmode (7 a.m. Pacific–style timing):**
-
-```bash
-./reserve_site.py --url '...' --f 'S51' --warmode
-```
-
-**Useful options:**
-
-| Flag | Meaning |
-|------|--------|
-| `--headed` | Show a real Chrome window (only useful on a machine with a screen; good for troubleshooting). |
-| `--debug` | Extra logging; if the map fails to load, the script can save `reserve_map_failure.html` and `reserve_map_failure.png` in the folder where you ran the command. |
-
 ---
 
-### Telegram bot (`reserve_site_v2.py`)
+## reserve.py
 
-**Status: work in progress.** Same automation as `reserve_site.py`, but you can **start and monitor jobs from Telegram**. The **browser still runs on the Linux machine** where `reserve_site_v2.py` is running (usually a server), not on your phone. For critical trips, many people still prefer **`reserve_site.py`** on the CLI until they trust v2.
+### reserve.py: section contents
 
----
+- [What it does](#reservepy-what-it-does)
+- [Prerequisites](#reservepy-prerequisites)
+- [Installation / setup](#reservepy-installation--setup)
+- [Usage](#reservepy-usage)
+- [Chrome: headless, visible window, or remote attach](#reservepy-chrome-headless-visible-window-or-remote-attach)
+- [Map troubleshooting](#reservepy-map-troubleshooting)
 
-#### If you only use Telegram (end user)
+### reserve.py: what it does
 
-You need an **operator** who runs the bot on a server and adds your Telegram **numeric user ID** to the allowlist. You also need the **bot’s username or link** (for example `t.me/YourBotName`).
+| Mode | Behaviour |
+|------|-----------|
+| **Normal (default)** | On an interval, checks which sites are free via the API. When one you want is free, launches Chrome, finds it on the map, clicks **Reserve** so it lands in the cart/hold. You still complete checkout on the website. |
+| **Warmode (`--warmode`)** | For “opens at 7 a.m. Pacific” style windows: about a minute before 7 it loads the map and prepares **Reserve**, then clicks at 7. See **[BC Parks — frontcountry camping](https://bcparks.ca/reservations/frontcountry-camping/)** for official rules. |
 
-1. **Open a private chat** with the bot in the Telegram app.
-2. Send **`/help`** - you should see commands. If you see **Unauthorized**, your user ID is not allowlisted; ask the operator to add you.
-3. **Get a booking link** the same way as for the CLI tools: on [Create booking](https://camping.bcparks.ca/create-booking/), search for park/dates, then on the **map / results** page copy the **full** `https://...` from the address bar. It must stay on **`camping.bcparks.ca`** and under **`/create-booking/`** (the bot rejects other URLs).
-4. **Start a job** - either:
-   - **`/reserve`** followed by the URL and optional flags (see below), or  
-   - Send a **single message** that is **only** that URL (starts a default normal-mode job).
-5. **While it runs**, the bot sends **status updates**. Routine messages (**who is available on the API**, **none of your `--f` sites free yet**, **waiting for the map**, etc.) are **not repeated** on every poll - you only get a new message when something **changes** or when something important happens (for example it starts trying the map, clicks **Reserve**, or errors). The first “still waiting” style message for a situation includes **how often it polls** and a **copy-paste line** ` /cancel <job_id> ` on its own line so you can stop the job from mobile.
-6. **Other commands** (allowlisted users only):
-   - **`/jobs`** - active and recent jobs  
-   - **`/status <job_id>`** - detail for one job  
-   - **`/cancel <job_id>`** - ask the server to stop that job (may take a moment)
+### reserve.py: prerequisites
 
-**Example messages** (wrap long URLs; site labels are examples):
+- Shared [venv and dependencies](#one-time-setup-clone-venv-dependencies).
+- **Google Chrome** installed on the machine where the browser runs (see Chrome section below).
 
-```text
-/reserve https://camping.bcparks.ca/create-booking/results?resourceLocationId=...&mapId=... --f 29,11 --i 60
-/reserve https://camping.bcparks.ca/create-booking/results?... --warmode --f S51 --timezone US/Pacific
-/jobs
-/status a1b2c3d4
-/cancel a1b2c3d4
-```
+### reserve.py: installation / setup
 
-Use **`/reserve@BotName ...`** if Telegram inserts the bot name; that form is supported. Options match **`python3 reserve_site_v2.py --help`** (for example `--debug`, `--headed`, `--rip` / `--rp` if your operator sets that up).
+1. Complete [shared setup](#one-time-setup-clone-venv-dependencies).
+2. Install Chrome on that host (Debian/Ubuntu example under [Chrome](#reservepy-chrome-headless-visible-window-or-remote-attach)).
+3. In default (non-remote) mode, **`webdriver-manager`** usually downloads a matching **ChromeDriver** on first run; you still must install **Chrome** yourself.
 
-**Security (short):** Only **listed Telegram user IDs** can use the bot for real actions. Others get **Unauthorized**. The bot may still be **findable** in Telegram if someone knows the username; safety is the **allowlist**, not secrecy. Do not post your **bot token** anywhere.
+### reserve.py: usage
 
-**Your numeric user ID** is **not** your `@username`. Ask the operator, or use a bot such as **`@userinfobot`** in Telegram to see your ID.
-
----
-
-#### If you run the bot (server operator)
-
-**Environment variables** (required for `--telegram-bot`):
+**Normal mode:**
 
 ```bash
-export TELEGRAM_BOT_TOKEN='...'        # from @BotFather - never log or commit
-export TELEGRAM_ALLOWED_USER_IDS='11111111,22222222'   # numeric IDs, comma-separated
+./reserve.py --url 'https://camping.bcparks.ca/create-booking/...'
+./reserve.py --url '...' --f 'S51,S52' --i 60
 ```
 
-**Optional:**
+`--f` is comma-separated; **order matters** (first matching free site is tried first).
+
+**Warmode:**
 
 ```bash
-export CAMPSLINGER_AUDIT_LOG='/var/log/campslinger_audit.log'   # JSON lines: user_id, action, job_id, booking URL, etc.; default ./campslinger_telegram_audit.log
-```
-
-**Run:**
-
-```bash
-cd campslinger && source venv/bin/activate
-python3 reserve_site_v2.py --telegram-bot
+./reserve.py --url '...' --f 'S51' --warmode
 ```
 
 **Useful flags:**
 
 | Flag | Meaning |
 |------|--------|
-| `--max-concurrent N` | Cap parallel reservation jobs (default **3**). |
-| `--no-terminal-log` | Stop printing job log lines on the **server terminal**; Telegram output is unchanged. |
+| `--headed` | Show a Chrome window (machine with a display; debugging). |
+| `--debug` | Extra logging; on map failure may write `reserve_map_failure.html` / `.png` in the cwd. |
+| `--rip` / `--rp` | Attach to your own Chrome with remote debugging (see below). |
 
-Keep the process running (**systemd**, **`tmux`**, etc.). If it exits, the bot stops responding.
+Optional Twilio SMS uses the same pattern as `monitor.py` (`--sms` and Twilio arguments).
 
-**Local operator notes:** A **`.env.local`** file in the repo (gitignored) can document variables and behavior for admins or tooling; the script does **not** auto-load it unless you **`source`** it in the shell or wire it into your service manager.
-
-**CLI without Telegram** - same as `reserve_site.py` style:
-
-```bash
-python3 reserve_site_v2.py --url 'https://camping.bcparks.ca/create-booking/...' --f 'S51' --i 60
-```
-
----
-
-## Chrome: invisible browser, visible window, or your own Chrome
-
-`reserve_site.py` (and v2 in CLI mode) can use Chrome in three ways:
+### reserve.py: Chrome: headless, visible window, or remote attach
 
 | Situation | What to use |
 |-----------|-------------|
-| Default on a server | **Headless** Chrome - the script runs a browser you don’t see; **`webdriver-manager`** usually **downloads** a matching **ChromeDriver** on first run (see below). **Google Chrome itself** is not installed by the script or `pip`. |
-| You want to *see* what’s happening | `--headed` (only on a computer with a normal desktop session). |
-| The script runs on a **server** but you want to use **your own Chrome** on another computer (e.g. already logged in) | `--rip` and `--rp` point at that Chrome’s “remote debugging” port. |
+| Default on a server | **Headless** Chrome; **`webdriver-manager`** usually downloads ChromeDriver on first run. **Chrome** must still be installed. |
+| You want to see the browser | `--headed` on a desktop session. |
+| Chrome on another machine (e.g. logged-in profile) | `--rip` and `--rp` to that Chrome’s remote debugging port (often with an SSH tunnel). |
 
-You need **Google Chrome** installed where the browser actually runs. Headless mode still launches that same **`google-chrome`** binary with a headless flag - it is not a separate “headless-only” package.
+Headless still runs the **`google-chrome`** binary with headless flags.
 
-### Chrome and ChromeDriver on the script machine (typical headless server)
-
-These steps assume a **64-bit x86 (amd64)** Linux host. Bare servers often ship without Chrome - install the browser first, then wire the driver.
-
-#### 1. Install Google Chrome (Debian / Ubuntu)
-
-Using Google’s APT repository:
+#### Install Google Chrome (Debian / Ubuntu)
 
 ```bash
 sudo apt update
@@ -247,17 +196,11 @@ sudo apt install -y google-chrome-stable
 google-chrome --version
 ```
 
-#### 2. Is ChromeDriver auto-installed?
+#### ChromeDriver
 
-**Partially, and only in default mode.** When you **do not** pass `--rip` / `--rp`, `reserve_site.py` calls **`ChromeDriverManager().install()`** from the **`webdriver-manager`** package (see `requirements.txt`). That **downloads** a ChromeDriver build into a cache (commonly under **`~/.wdm`**) and passes it to Selenium - it does **not** run `apt install chromedriver`, and it does **not** install Chrome.
+**Default local mode:** `reserve.py` uses **`ChromeDriverManager().install()`** — downloads a driver into a cache (often `~/.wdm`). It does **not** install Chrome.
 
-You can skip **manual** ChromeDriver setup on the script host **if** default mode works and the download succeeds. You may still need a **manual** driver if you use **remote attach** (`--rip` / `--rp`), an older copy of the script **without** `webdriver-manager`, or **`webdriver-manager` fails** (no HTTPS to Google/storage, disk permissions, proxy, or unusual version detection).
-
-**Remote mode always needs `chromedriver` on `PATH`** on the machine that runs the script, matching the Chrome you attached to - see below.
-
-#### 3. Install ChromeDriver manually (Linux)
-
-For **`--rip` / `--rp`**, or when **`webdriver-manager`** will not run. Match **`google-chrome --version`** on the Chrome host:
+**`--rip` / `--rp`:** the machine that **runs** `reserve.py` needs **`chromedriver` on `PATH`**, version matching the Chrome you attached to. Example install matching Chrome’s version:
 
 ```bash
 CHROME_VERSION=$(google-chrome --version | awk '{print $3}')
@@ -268,17 +211,9 @@ sudo install -m 755 chromedriver-linux64/chromedriver /usr/local/bin/chromedrive
 chromedriver --version
 ```
 
-### Visible window (`--headed`)
+#### Remote debugging (your own Chrome)
 
-Turns off headless mode so a window appears - helpful when the map seems stuck or you want to watch clicks.
-
-### Your own Chrome (`--rip` / `--rp`)
-
-**Plain idea:** you start Chrome yourself with a special “remote debugging” port; the script connects to **that** Chrome instead of starting a fresh one. That helps when you need to be logged in on your home PC while the script runs on a server.
-
-#### 1. Start Chrome on the machine with the screen
-
-Pick a folder for Chrome to remember logins (example below) and a port (often **9222**):
+On the machine with the screen:
 
 ```bash
 google-chrome \
@@ -288,70 +223,144 @@ google-chrome \
   --no-default-browser-check
 ```
 
-Use the same port number later as `--rp`.
-
-#### 2. Tell the script where to connect
-
-| Where the script runs | Typical `--rip` | `--rp` |
-|------------------------|-----------------|--------|
-| Same computer as Chrome | `127.0.0.1` | e.g. `9222` |
-| Server → another PC on your home network | That PC’s IP (if Chrome accepts outside connections) | same port |
-
-Example:
+From the script host (same PC: `127.0.0.1`; over network or via tunnel: see your setup):
 
 ```bash
-./reserve_site.py --url '...' --f 'S51' --rip 192.168.1.50 --rp 9222
+./reserve.py --url '...' --f 'S51' --rip 192.168.1.50 --rp 9222
 ```
 
-Only open that port on your firewall for trusted machines. **Never** expose it to the whole internet.
-
-**Common snag:** On recent Chrome, the debug port often listens on **`127.0.0.1` only**. Then your server cannot connect to `desktop_ip:9222` directly. The fix that usually works is an **SSH tunnel**: from the server, forward your desktop’s port so the script still uses `127.0.0.1` locally.
+**SSH tunnel** when the debug port is localhost-only on the desktop:
 
 ```bash
 ssh -N -L 9222:127.0.0.1:9222 you@your-desktop
+# then: --rip 127.0.0.1 --rp 9222
 ```
 
-Then run the script with `--rip 127.0.0.1 --rp 9222`. Chrome must still be running on the desktop with `--remote-debugging-port=9222`.
+Do not expose the debug port to the public internet.
 
-**First-time SSH on the desktop:** you may need an SSH server there (Debian/Ubuntu example):
+### reserve.py: map troubleshooting
 
-```bash
-sudo apt update
-sudo apt install -y openssh-server
-sudo systemctl enable --now ssh
-```
-
-#### 3. ChromeDriver on the machine that runs the script
-
-When you use `--rip` / `--rp`, the script does **not** use the automatic driver download for that path. The computer where you **run** `reserve_site.py` must have a **`chromedriver` program** installed and on your `PATH`, and its version should match the Chrome version you connected to.
-
-```bash
-google-chrome --version   # on the computer running Chrome
-chromedriver --version    # on the computer running the script
-```
-
-#### 4. Why people use “your own” Chrome
-
-- Stay logged in with your normal profile.
-- Sometimes the map behaves more reliably than in invisible mode.
-
-The script attaches to the Chrome you started; it does not open a second profile for you.
-
-### Map load troubleshooting
-
-If invisible Chrome keeps timing out on the map:
-
-1. Try **`--debug`** (saved page and screenshot on failure).
+1. Try **`--debug`** (artifacts on failure).
 2. Try **`--headed`** on a machine with a display.
-3. Try **your own Chrome** with `--rip` / `--rp` (often with an SSH tunnel).
-4. Make sure Chrome and ChromeDriver versions match when using remote attach.
+3. Try **remote Chrome** with `--rip` / `--rp`.
+4. Match Chrome and ChromeDriver versions when using remote attach.
+
+---
+
+## reserve_tg.py
+
+### reserve_tg.py: section contents
+
+- [What it does](#reserve_tgpy-what-it-does)
+- [Server operator: full setup](#reserve_tgpy-server-operator-full-setup)
+- [Process flags](#reserve_tgpy-process-flags)
+- [Telegram user guide](#reserve_tgpy-telegram-user-guide)
+- [Park name in messages](#reserve_tgpy-park-name-in-messages)
+- [Security notes](#reserve_tgpy-security-notes)
+
+### reserve_tg.py: what it does
+
+`reserve_tg.py` is **only** the long-polling **Telegram bot**. It does **not** offer a standalone “run once from CLI with `--url`” mode; use **`reserve.py`** for that.
+
+The **browser runs on the Linux host** where you start `reserve_tg.py` (typically a server), not on the phone. Allowed users send commands and URLs in chat; the bot starts **jobs** (with a concurrency limit), sends deduplicated status lines to Telegram, and can attach **Cancel / Status / Jobs** buttons to the job-start message.
+
+### reserve_tg.py: server operator: full setup
+
+1. **Python environment**  
+   Use the same [clone + venv + `pip install -r requirements.txt`](#one-time-setup-clone-venv-dependencies) as the other scripts.
+
+2. **Google Chrome on the server**  
+   Install Chrome the same way as for `reserve.py` ([Chrome install](#reservepy-chrome-headless-visible-window-or-remote-attach)). The bot uses **headless** automation only (no `--headed` / `--rip` / `--rp` in this script).
+
+3. **Create the bot in Telegram**  
+   - Open Telegram, talk to **[@BotFather](https://t.me/BotFather)**.  
+   - Create a new bot, choose a name and username.  
+   - Copy the **HTTP API token** BotFather gives you. **Never** commit it or post it publicly.
+
+4. **Allowlisted user IDs**  
+   The bot only accepts commands from numeric IDs listed in `TELEGRAM_ALLOWED_USER_IDS`. These are **not** `@usernames`. Users can discover their ID with bots like **@userinfobot**.
+
+5. **Environment variables** (required):
+
+```bash
+export TELEGRAM_BOT_TOKEN='...'                    # from BotFather
+export TELEGRAM_ALLOWED_USER_IDS='11111111,22222222'   # comma-separated integers
+```
+
+Optional:
+
+```bash
+export CAMPSLINGER_AUDIT_LOG='/var/log/campslinger_audit.log'
+# JSON lines: user_id, action, job_id, booking URL, etc.
+# Default if unset: ./campslinger_telegram_audit.log
+```
+
+The script reads **only the process environment**; it does not load `.env` files unless your shell or systemd does (e.g. `set -a; source .env.local`).
+
+6. **Run the bot**
+
+```bash
+cd campslinger && source venv/bin/activate
+python3 reserve_tg.py
+```
+
+Keep it running with **systemd**, **tmux**, or similar. If the process exits, the bot stops.
+
+7. **Optional: systemd sketch**
+
+```ini
+[Service]
+WorkingDirectory=/path/to/campslinger
+EnvironmentFile=/path/to/campslinger/telegram.env
+ExecStart=/path/to/campslinger/venv/bin/python3 /path/to/campslinger/reserve_tg.py
+Restart=on-failure
+```
+
+Put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` in `telegram.env` with `0600` permissions.
+
+### reserve_tg.py: process flags
+
+| Flag | Meaning |
+|------|--------|
+| `--max-concurrent N` | Max parallel reservation jobs (default **3**). |
+| `--no-terminal-log` | Stop printing per-job lines on the **server** terminal; Telegram logging unchanged. |
+
+### reserve_tg.py: Telegram user guide
+
+**Who can use it:** only user IDs on the operator’s allowlist. Others see **Unauthorized**.
+
+**Help:** send **`/help`**. You should see **Campslinger Telegram commands** and a **Quick actions** keyboard (`/jobs`, `/status`, `/cancel`, `/reserve`, `/help`).
+
+**Quick action buttons**
+
+- **`/jobs`**, **`/help`**: run immediately.  
+- **`/status`** / **`/cancel`**: the bot asks for the **job id**; reply with that id (e.g. from `/jobs` or from a previous message).  
+- **`/reserve`**: guided flow — enter the **booking URL** first, then **Go** (URL + sensible defaults) or **More** (step through options with a live preview of the `/reserve …` command). You can still type a full **`/reserve https://… --f S51 --i 60`** manually if you prefer.
+
+**Plain URL message:** a message that is **only** your `https://camping.bcparks.ca/create-booking/...` URL starts a default normal-mode job (same idea as a quick **Go**).
+
+**After a job starts:** the bot sends **Cancel**, **Status**, and **Jobs** buttons for that job so you can run `/cancel <id>` and `/status <id>` without typing.
+
+**While a job runs:** status updates are **deduplicated** where possible; important events and changes still go to chat. Routine “still waiting” style messages can include the poll interval and job id for reference.
+
+**URL rules:** must be `https://` on **`camping.bcparks.ca`** under **`/create-booking/`** (enforced to limit abuse).
+
+Use **`/reserve@YourBot`** if Telegram inserts the bot name; that form is supported.
+
+### reserve_tg.py: park name in messages
+
+When the API returns a resolvable park name, log lines mirrored to Telegram are prefixed with **`[park]`** so you can confirm the correct park.
+
+### reserve_tg.py: security notes
+
+- Safety is the **numeric allowlist**, not hiding the bot username.  
+- Never share the **bot token**; revoke in BotFather if leaked.  
+- Audit log path should be restricted on disk in production.
 
 ---
 
 ## Policies and disclaimer
 
-- A successful **Reserve** click usually puts a **time-limited hold** in the cart; finish checkout before it expires (often on the order of ~15 minutes).
-- Use tools like this responsibly. Polling too aggressively can get an IP blocked - keep reasonable intervals.
-- This is a hobby project; BC Parks may change the website at any time.
-
-**Not affiliated with BC Parks.** Use at your own risk.
+- A successful **Reserve** usually creates a **time-limited hold**; finish checkout on the real site before it expires.  
+- Poll at reasonable intervals; aggressive polling can get an IP blocked.  
+- BC Parks may change the site at any time. **Not affiliated with BC Parks.** Use at your own risk.

@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-BC Parks reservation helper: API polling (normal mode) + Selenium for map / Reserve.
-Warmode uses Selenium only — prefetch at T-1 minute, click Reserve at 7:00 (no API calls).
+Campslinger Telegram bot (reserve_tg.py): allowlisted users start BC Parks reservation
+jobs from Telegram. Chrome runs headless on the server. Same core automation as reserve.py
+(API polling + Selenium map / Reserve); this entrypoint is Telegram-only (no standalone CLI).
 """
 
 import argparse
@@ -109,10 +110,11 @@ def set_log_callback(callback):
     _LOGGER_LOCAL.callback = callback
 
 
-def set_telegram_job_meta(job_id, interval_seconds):
-    """Per-job thread: job id and interval for /cancel footer on poll status messages."""
+def set_telegram_job_meta(job_id, interval_seconds, park_name=None):
+    """Per-job thread: job id, interval, optional park label; /cancel footer on poll messages."""
     _LOGGER_LOCAL.telegram_job_id = job_id
     _LOGGER_LOCAL.telegram_interval = int(interval_seconds)
+    _LOGGER_LOCAL.park_name = (park_name or "").strip() or None
     _LOGGER_LOCAL.poll_digest = None
 
 
@@ -158,7 +160,11 @@ def pp(message, error=False, telegram_digest=None, skip_telegram=False):
     footer (see set below). telegram_digest None = always mirror to Telegram (if callback).
     skip_telegram=True: print to terminal only; do not notify Telegram or change poll_digest.
     """
-    line = "{} - {}".format(current_time(), message)
+    park = getattr(_LOGGER_LOCAL, "park_name", None)
+    if park:
+        line = "{} - [{}] {}".format(current_time(), park, message)
+    else:
+        line = "{} - {}".format(current_time(), message)
     callback = getattr(_LOGGER_LOCAL, "callback", None)
     if callback and not skip_telegram:
         send_telegram = True
@@ -196,8 +202,8 @@ def shorten_url(url):
         import pyshorteners
 
         return pyshorteners.Shortener().tinyurl.short(url)
-    except Exception as e:
-        sys.exit("Error: pyshorteners function failed: {}".format(e))
+    except Exception:
+        return url
 
 
 def send_sms(message, client, to_number, from_number):
@@ -264,6 +270,54 @@ def bcparks_fetch_sites_map(booking_url):
     return bcparks_normalize_sites(r1.json(), r2.json())
 
 
+def bcparks_fetch_park_name(booking_url):
+    """
+    Best-effort park / location label from the same resources API used for site names.
+    Returns None if the response shape differs or the request fails.
+    """
+    try:
+        validate_bcparks_booking_url(booking_url)
+        site_name_params = bcparks_parse_url(
+            booking_url, ["resourceLocationId", "mapId"]
+        )
+        names_url = "{}resourcelocation/resources?{}".format(
+            BCPARKS_API_BASE, urlencode(site_name_params)
+        )
+        r = requests.get(names_url, headers=BCPARKS_HEADERS, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, dict):
+            return None
+        for key in (
+            "resourceLocationName",
+            "parkName",
+            "locationName",
+            "name",
+            "title",
+            "displayName",
+        ):
+            v = data.get(key)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        nested = data.get("resourceLocation") or data.get("location") or data.get("park")
+        if isinstance(nested, dict):
+            for key in ("name", "localizedName", "title", "displayName"):
+                v = nested.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+        # Some payloads nest under resourceLocationLocalizedValues
+        locs = data.get("resourceLocationLocalizedValues") or data.get("localizedValues")
+        if isinstance(locs, list) and locs:
+            first = locs[0]
+            if isinstance(first, dict):
+                v = first.get("name") or first.get("value")
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+    except Exception:
+        return None
+    return None
+
+
 def api_available_labels(sites):
     """Display labels (sorted) for sites with API status == available (0)."""
     labels = []
@@ -290,20 +344,9 @@ def pick_api_target(sites, requested_sites):
     return None
 
 
-def setup_webdriver_remote(ip, port):
+def setup_webdriver():
     options = Options()
-    options.add_experimental_option("debuggerAddress", "{}:{}".format(ip, port))
-    try:
-        return webdriver.Chrome(options=options)
-    except WebDriverException as e:
-        pp("❌ Failed to connect to existing Chrome instance: {}".format(e))
-        return None
-
-
-def setup_webdriver(headed=False):
-    options = Options()
-    if not headed:
-        options.add_argument("--headless=new")
+    options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -762,175 +805,24 @@ class JobManager:
             return list(self.recent)[:count]
 
 
-class _HelpFormatter(
-    argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHelpFormatter
-):
-    """Show defaults in option help and preserve newlines in description/epilog."""
-
-    pass
-
-
-def build_arg_parser():
-    description = (
-        "Place a BC Parks campsite hold via the booking map (Selenium).\n\n"
-        "Normal mode:\n"
-        "  Poll the public API every --interval (two GETs per poll: resource names + map\n"
-        "  availability). When your preferred site is free in the API, load the results URL\n"
-        "  in Chrome, click the matching green map pin (icon-available), then Reserve.\n\n"
-        "Warmode (--w / --warmode):\n"
-        "  No API calls. About one minute before 7:00 in --timezone, load the map, open the\n"
-        "  sidebar for the first available preferred site, then click Reserve at 7:00.\n"
-        "  Intended for first-day-of-window bookings (see BC Parks frontcountry rules).\n\n"
-        "More context: https://github.com/Mukrosz/campslinger\n\n"
-        "Examples:\n"
-        "  Reserve any available site (normal mode; API picks first free key when --f omitted).\n"
-        "    ./reserve_site.py --url 'https://camping.bcparks.ca/create-booking/...'\n"
-        "    ./reserve_site.py --u   'https://camping.bcparks.ca/create-booking/...'\n\n"
-        "  Prefer specific sites (left-to-right order = try order; first match wins).\n"
-        "    ./reserve_site.py --url '...' --f 'S51,S52,S53'\n\n"
-        "  Poll every 30 seconds instead of 60.\n"
-        "    ./reserve_site.py --url '...' --f 'S51' --interval 30\n\n"
-        "  Warmode at 7:00 Pacific (prefetch ~6:59).\n"
-        "    ./reserve_site.py --url '...' --f 'S51' --warmode\n\n"
-        "  Remote Chrome (log in first), then attach (ChromeDriver on PATH must match Chrome).\n"
-        "    google-chrome --user-data-dir=$HOME/.bcparks-profile \\\n"
-        "      --remote-debugging-port=9222 --no-first-run --no-default-browser-check\n"
-        "    ./reserve_site.py --url '...' --rip 127.0.0.1 --rp 9222 --f 'S51'\n\n"
-        "  Headed browser (debug map/timeouts on a machine with a display).\n"
-        "    ./reserve_site.py --url '...' --f 'S51' --headed\n\n"
-        "  SMS when a reservation succeeds (requires Twilio credentials).\n"
-        "    ./reserve_site.py --url '...' --f 'S51' --sms \\\n"
-        "      --twilio_sid … --twilio_auth_token … --twilio_number … --my_phone_number …\n\n"
-        "  Save map step screenshots / failure HTML when the map fails to load.\n"
-        "    ./reserve_site.py --url '...' --f 'S51' --debug"
+def build_telegram_arg_parser():
+    p = argparse.ArgumentParser(
+        description="Campslinger Telegram bot: BC Parks reserve automation (server-side Chrome)."
     )
-    epilog = (
-        "Notes:\n"
-        "  --url and --u are equivalent. Normal mode uses the API only to choose *when* and\n"
-        "  *which label* to reserve; Selenium must still click the map. Warmode uses the map\n"
-        "  only (green pins / icon-available). Debian/Linux is the tested platform; see README."
-    )
-    parser = argparse.ArgumentParser(
-        description=description,
-        epilog=epilog,
-        formatter_class=_HelpFormatter,
-    )
-    parser.add_argument(
-        "--url",
-        "--u",
-        dest="url",
-        required=False,
-        metavar="URL",
-        help="Full create-booking *results* URL (must include resourceLocationId, mapId, "
-        "startDate, endDate in the query string).",
-    )
-    parser.add_argument(
-        "--interval",
-        "--i",
-        type=int,
-        default=60,
-        metavar="SECONDS",
-        help="Seconds between API polls in normal mode (ignored in warmode).",
-    )
-    parser.add_argument(
-        "--filter",
-        "--f",
-        type=comma_separated_list,
-        metavar="SITES",
-        help="Comma-separated preferred campsite labels, lowercased internally. "
-        "Order matters: first API-available / first green pin match is used.",
-    )
-    parser.add_argument(
-        "--sms",
-        "--s",
-        action="store_true",
-        help="Send a Twilio SMS when a reservation completes successfully.",
-    )
-    parser.add_argument(
-        "--twilio_sid",
-        "--tsid",
-        default="",
-        metavar="SID",
-        help="Twilio Account SID (required with --sms).",
-    )
-    parser.add_argument(
-        "--twilio_auth_token",
-        "--tat",
-        default="",
-        metavar="TOKEN",
-        help="Twilio auth token (required with --sms).",
-    )
-    parser.add_argument(
-        "--twilio_number",
-        "--tn",
-        default="",
-        metavar="FROM",
-        help="Twilio sending phone number (required with --sms).",
-    )
-    parser.add_argument(
-        "--my_phone_number",
-        "--mpn",
-        default="",
-        metavar="TO",
-        help="Your mobile number to receive SMS (required with --sms).",
-    )
-    parser.add_argument(
-        "--warmode",
-        "--w",
-        action="store_true",
-        help="Warmode: prefetch map ~1 minute before 07:00 in --timezone, click Reserve "
-        "at 07:00. Selenium only (no API).",
-    )
-    parser.add_argument(
-        "--debug",
-        "--d",
-        action="store_true",
-        help="Verbose diagnostics: screenshots on success; on map failure writes "
-        "reserve_map_failure.html and reserve_map_failure.png in the cwd.",
-    )
-    parser.add_argument(
-        "--headed",
-        action="store_true",
-        help="Run Chrome with a visible window (disable headless). Useful for debugging.",
-    )
-    parser.add_argument(
-        "--timezone",
-        default="US/Pacific",
-        metavar="TZ",
-        help="IANA timezone name for warmode 7:00 / prefetch timing.",
-    )
-    parser.add_argument(
-        "--remote_ip",
-        "--rip",
-        metavar="HOST",
-        help="Host running Chrome with --remote-debugging-port (use with --rp).",
-    )
-    parser.add_argument(
-        "--remote_port",
-        "--rp",
-        type=int,
-        metavar="PORT",
-        help="Remote debugging port (e.g. 9222). Both --rip and --rp required together.",
-    )
-    parser.add_argument(
-        "--telegram-bot",
-        action="store_true",
-        help="Run Telegram bot mode (long polling) instead of one CLI run.",
-    )
-    parser.add_argument(
+    p.add_argument(
         "--max-concurrent",
         type=int,
         default=3,
-        help="Max concurrent reservation jobs in Telegram bot mode.",
+        help="Max concurrent reservation jobs.",
     )
-    parser.add_argument(
+    p.add_argument(
         "--no-terminal-log",
         action="store_false",
         dest="terminal_log",
         default=True,
-        help="With --telegram-bot: do not print job or bot log lines to the terminal.",
+        help="Do not print job lines to the server terminal.",
     )
-    return parser
+    return p
 
 
 class _BotCommandParser(argparse.ArgumentParser):
@@ -950,10 +842,7 @@ def build_bot_reserve_parser():
     parser.add_argument("--my_phone_number", "--mpn", default="")
     parser.add_argument("--warmode", "--w", action="store_true", default=False)
     parser.add_argument("--debug", "--d", action="store_true", default=False)
-    parser.add_argument("--headed", action="store_true", default=False)
     parser.add_argument("--timezone", default="US/Pacific")
-    parser.add_argument("--remote_ip", "--rip", required=False)
-    parser.add_argument("--remote_port", "--rp", type=int, required=False)
     return parser
 
 
@@ -969,9 +858,145 @@ def parse_bot_reserve_args(raw_text):
     return args
 
 
-def _send_telegram_text(bot, loop, chat_id, text):
+# Telegram UI: callback_data must stay short (64-byte limit).
+UD_PENDING = "csl_pending"
+UD_RESERVE = "csl_reserve"
+
+
+def _main_menu_keyboard():
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📋 /jobs", callback_data="m:j"),
+                InlineKeyboardButton("🔎 /status", callback_data="m:s"),
+            ],
+            [
+                InlineKeyboardButton("🛑 /cancel", callback_data="m:c"),
+                InlineKeyboardButton("⛺ /reserve", callback_data="m:r"),
+            ],
+            [InlineKeyboardButton("❓ /help", callback_data="m:h")],
+        ]
+    )
+
+
+def _job_control_keyboard(job_id):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🛑 Cancel", callback_data="j:c:{}".format(job_id)),
+                InlineKeyboardButton("📊 Status", callback_data="j:s:{}".format(job_id)),
+            ],
+            [InlineKeyboardButton("📋 Jobs", callback_data="j:l")],
+        ]
+    )
+
+
+def _reserve_go_more_keyboard():
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("▶️ Go", callback_data="r:g"),
+                InlineKeyboardButton("⚙️ More", callback_data="r:m"),
+            ],
+            [InlineKeyboardButton("❌ Cancel wizard", callback_data="r:x")],
+        ]
+    )
+
+
+def _reserve_more_menu_keyboard():
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Sites (--f)", callback_data="r:o:f")],
+            [InlineKeyboardButton("Interval (--i)", callback_data="r:o:i")],
+            [
+                InlineKeyboardButton("🌅 Warmode", callback_data="r:o:w"),
+                InlineKeyboardButton("🐛 Debug", callback_data="r:o:d"),
+            ],
+            [InlineKeyboardButton("🌐 Timezone", callback_data="r:o:t")],
+            [InlineKeyboardButton("▶ Run", callback_data="r:e")],
+            [
+                InlineKeyboardButton("🔙 Back", callback_data="r:b"),
+                InlineKeyboardButton("🔄 Reset", callback_data="r:z"),
+            ],
+        ]
+    )
+
+
+def _clear_user_flow(context):
+    context.user_data.pop(UD_PENDING, None)
+    context.user_data.pop(UD_RESERVE, None)
+
+
+def _default_reserve_state(url):
+    return {
+        "url": url,
+        "interval": 60,
+        "filter": None,
+        "warmode": False,
+        "debug": False,
+        "timezone": "US/Pacific",
+        "sms": False,
+        "twilio_sid": "",
+        "twilio_auth_token": "",
+        "twilio_number": "",
+        "my_phone_number": "",
+    }
+
+
+def format_reserve_command_preview(rb):
+    parts = ["/reserve", rb["url"]]
+    if rb.get("filter"):
+        parts.append("--f {}".format(",".join(rb["filter"])))
+    iv = int(rb.get("interval") or 60)
+    if iv != 60:
+        parts.append("--i {}".format(iv))
+    if rb.get("warmode"):
+        parts.append("--warmode")
+    if rb.get("debug"):
+        parts.append("--debug")
+    tz = rb.get("timezone") or "US/Pacific"
+    if tz != "US/Pacific":
+        parts.append("--timezone {}".format(tz))
+    if rb.get("sms"):
+        parts.append("--sms …")
+    return " ".join(parts)
+
+
+def reserve_state_to_shlex_raw(rb):
+    """Build a string parse_bot_reserve_args can shlex.split."""
+    chunks = [shlex.quote(rb["url"])]
+    if rb.get("filter"):
+        chunks.append("--f")
+        chunks.append(shlex.quote(",".join(rb["filter"])))
+    iv = int(rb.get("interval") or 60)
+    if iv != 60:
+        chunks.append("--i")
+        chunks.append(str(iv))
+    if rb.get("warmode"):
+        chunks.append("--warmode")
+    if rb.get("debug"):
+        chunks.append("--debug")
+    tz = rb.get("timezone") or "US/Pacific"
+    if tz != "US/Pacific":
+        chunks.append("--timezone")
+        chunks.append(shlex.quote(tz))
+    return " ".join(chunks)
+
+
+def _send_telegram_text(bot, loop, chat_id, text, reply_markup=None):
     async def _send():
-        await bot.send_message(chat_id=chat_id, text=text)
+        kw = {"chat_id": chat_id, "text": text}
+        if reply_markup is not None:
+            kw["reply_markup"] = reply_markup
+        await bot.send_message(**kw)
 
     fut = asyncio.run_coroutine_threadsafe(_send(), loop)
     try:
@@ -985,7 +1010,8 @@ def _run_job(job, manager, bot, loop):
         _send_telegram_text(bot, loop, job.chat_id, line)
 
     set_log_callback(_tg)
-    set_telegram_job_meta(job.job_id, job.args.interval)
+    park = bcparks_fetch_park_name(job.args.url)
+    set_telegram_job_meta(job.job_id, job.args.interval, park_name=park)
     args = job.args
     client = None
     if args.sms:
@@ -1007,10 +1033,7 @@ def _run_job(job, manager, bot, loop):
             set_log_callback(None)
             return
 
-    if args.remote_ip and args.remote_port:
-        driver = setup_webdriver_remote(args.remote_ip, args.remote_port)
-    else:
-        driver = setup_webdriver(headed=args.headed)
+    driver = setup_webdriver()
     if not driver:
         _send_telegram_text(bot, loop, job.chat_id, "❌ WebDriver initialization failed")
         manager.mark_done(job.job_id, "error", error="webdriver_init_failed")
@@ -1025,7 +1048,6 @@ def _run_job(job, manager, bot, loop):
         set_log_callback(None)
         return
 
-    use_remote = bool(args.remote_ip and args.remote_port)
     try:
         if args.warmode:
             reserved_site = reserve_war_mode(
@@ -1111,36 +1133,42 @@ def _run_job(job, manager, bot, loop):
             url=args.url,
         )
     finally:
-        if not use_remote:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        try:
+            driver.quit()
+        except Exception:
+            pass
         set_log_callback(None)
 
 
 def telegram_help_text():
     return (
-        "reserve_site_v2 Telegram commands\n\n"
-        "/reserve <url> [--f S51,S52] [--i 60] [--warmode] [--timezone US/Pacific] "
-        "[--debug] [--headed] [--rip host --rp 9222]\n"
+        "Campslinger Telegram commands\n\n"
+        "/reserve <url> [--f S51,S52] [--i 60] [--warmode] [--timezone US/Pacific] [--debug] [--sms + Twilio flags]\n"
         "/jobs\n"
         "/status <job_id>\n"
         "/cancel <job_id>\n"
         "/help\n\n"
-        "Also supported: send a plain URL message to start a default normal-mode job."
+        "Tip: use the buttons under this message, or send a plain booking URL to start with defaults."
     )
 
 
-async def _tg_reply(update, text):
+async def _tg_reply(update, text, reply_markup=None):
     em = update.effective_message
     if em:
-        await em.reply_text(text)
-    return em is not None
+        await em.reply_text(text, reply_markup=reply_markup)
+        return True
+    return False
 
 
 def run_telegram_bot(args):
-    from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
+    from telegram.ext import (
+        ApplicationBuilder,
+        CallbackQueryHandler,
+        CommandHandler,
+        ContextTypes,
+        MessageHandler,
+        filters,
+    )
 
     set_terminal_log_enabled(args.terminal_log)
 
@@ -1189,7 +1217,7 @@ def run_telegram_bot(args):
                 except Exception:
                     pass
 
-    async def _start_job(update, raw):
+    async def _start_job(update, context, raw):
         if not authorized(update):
             await reject(update)
             return
@@ -1242,6 +1270,25 @@ def run_telegram_bot(args):
                 ",".join(job_args.filter or []),
             ),
         )
+        cid = update.effective_chat.id
+        await context.bot.send_message(
+            chat_id=cid,
+            text="Job {} — quick actions while it runs:".format(job.job_id),
+            reply_markup=_job_control_keyboard(job.job_id),
+        )
+
+    def _format_status_text(jid):
+        job = manager.get(jid)
+        if not job:
+            return "Job {} not found".format(jid)
+        return "job={} status={} started={} ended={} result={} error={}".format(
+            job.job_id,
+            job.status,
+            job.started_at,
+            job.ended_at or "-",
+            job.result_site or "-",
+            job.error or "-",
+        )
 
     async def help_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -1251,6 +1298,11 @@ def run_telegram_bot(args):
         _bot_console_line("/help user={}".format(uid if uid is not None else "?"))
         audit_log("command_help", user_id=uid, chat_id=update.effective_chat.id if update.effective_chat else None)
         await _tg_reply(update, telegram_help_text())
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Quick actions (tap a button):",
+            reply_markup=_main_menu_keyboard(),
+        )
 
     async def reserve_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -1273,10 +1325,13 @@ def run_telegram_bot(args):
             )
             await _tg_reply(
                 update,
-                "Usage: /reserve <url> [--f S1,S2] [--i 60] ...\n\n{}".format(telegram_help_text()),
+                "Type /reserve with a URL and options, send a plain booking URL, or tap ⛺ /reserve below.\n\n{}".format(
+                    telegram_help_text()
+                ),
+                reply_markup=_main_menu_keyboard(),
             )
             return
-        await _start_job(update, raw)
+        await _start_job(update, context, raw)
 
     async def jobs_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -1318,20 +1373,7 @@ def run_telegram_bot(args):
             job_id=jid,
             found=job is not None,
         )
-        if not job:
-            await _tg_reply(update, "Job not found")
-            return
-        await _tg_reply(
-            update,
-            "job={} status={} started={} ended={} result={} error={}".format(
-                job.job_id,
-                job.status,
-                job.started_at,
-                job.ended_at or "-",
-                job.result_site or "-",
-                job.error or "-",
-            ),
-        )
+        await _tg_reply(update, _format_status_text(jid))
 
     async def cancel_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -1367,8 +1409,102 @@ def run_telegram_bot(args):
         txt = txt.strip()
         uid = update.effective_user.id if update.effective_user else None
         cid = update.effective_chat.id if update.effective_chat else None
+        pend = context.user_data.get(UD_PENDING)
+
+        if pend in ("status", "cancel"):
+            if txt.lower() in ("abort", "stop", "nevermind"):
+                context.user_data.pop(UD_PENDING, None)
+                await _tg_reply(update, "Okay, cancelled.")
+                return
+            jid = txt.split()[0].strip()
+            if pend == "status":
+                context.user_data.pop(UD_PENDING, None)
+                audit_log("command_status", user_id=uid, chat_id=cid, job_id=jid, found=manager.get(jid) is not None)
+                await _tg_reply(update, _format_status_text(jid))
+                return
+            context.user_data.pop(UD_PENDING, None)
+            ok = manager.cancel(jid)
+            audit_log("command_cancel", user_id=uid, chat_id=cid, job_id=jid, accepted=ok)
+            await _tg_reply(
+                update,
+                "Cancellation requested for {}".format(jid) if ok else "Job {} not active".format(jid),
+            )
+            return
+
+        if pend == "r_url":
+            if not (txt.startswith("http://") or txt.startswith("https://")):
+                await _tg_reply(update, "Please send a URL starting with https://camping.bcparks.ca/... or type abort.")
+                return
+            try:
+                validate_bcparks_booking_url(txt)
+            except ValueError as e:
+                await _tg_reply(update, "Invalid URL: {}".format(e))
+                return
+            context.user_data.pop(UD_PENDING, None)
+            context.user_data[UD_RESERVE] = _default_reserve_state(txt)
+            rb = context.user_data[UD_RESERVE]
+            await _tg_reply(
+                update,
+                "URL saved.\n\nCurrent command:\n{}\n\n▶️ Go = run with defaults only.\n⚙️ More = add sites, interval, warmode, …".format(
+                    format_reserve_command_preview(rb)
+                ),
+                reply_markup=_reserve_go_more_keyboard(),
+            )
+            return
+
+        if pend == "r_f":
+            context.user_data.pop(UD_PENDING, None)
+            rb = context.user_data.get(UD_RESERVE)
+            if not rb:
+                await _tg_reply(update, "Wizard expired. Tap ⛺ /reserve again.")
+                return
+            if txt.lower() not in ("clear", "none", "-"):
+                rb["filter"] = comma_separated_list(txt)
+            else:
+                rb["filter"] = None
+            await _tg_reply(
+                update,
+                "Updated.\n\n{}\n\nUse More to change more options or Run.".format(
+                    format_reserve_command_preview(rb)
+                ),
+                reply_markup=_reserve_more_menu_keyboard(),
+            )
+            return
+
+        if pend == "r_i":
+            context.user_data.pop(UD_PENDING, None)
+            rb = context.user_data.get(UD_RESERVE)
+            if not rb:
+                await _tg_reply(update, "Wizard expired.")
+                return
+            try:
+                rb["interval"] = max(5, int(txt.split()[0]))
+            except ValueError:
+                await _tg_reply(update, "Send a number of seconds (e.g. 60), or open More again.")
+                return
+            await _tg_reply(
+                update,
+                "Updated.\n\n{}\n\n".format(format_reserve_command_preview(rb)),
+                reply_markup=_reserve_more_menu_keyboard(),
+            )
+            return
+
+        if pend == "r_tz":
+            context.user_data.pop(UD_PENDING, None)
+            rb = context.user_data.get(UD_RESERVE)
+            if not rb:
+                await _tg_reply(update, "Wizard expired.")
+                return
+            rb["timezone"] = txt.split()[0].strip()
+            await _tg_reply(
+                update,
+                "Updated.\n\n{}\n\n".format(format_reserve_command_preview(rb)),
+                reply_markup=_reserve_more_menu_keyboard(),
+            )
+            return
+
         if txt.startswith("http://") or txt.startswith("https://"):
-            await _start_job(update, txt)
+            await _start_job(update, context, txt)
             return
         audit_log(
             "text_message",
@@ -1376,9 +1512,220 @@ def run_telegram_bot(args):
             chat_id=cid,
             preview=txt[:200],
         )
-        await _tg_reply(update, "Send /help for commands.")
+        await _tg_reply(
+            update,
+            "Send /help, a booking URL, or use the buttons from the last help message.",
+        )
+
+    async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
+        q = update.callback_query
+        if not q:
+            return
+        if not authorized(update):
+            await q.answer("Unauthorized", show_alert=True)
+            return
+        data = q.data or ""
+
+        async def ack():
+            try:
+                await q.answer()
+            except Exception:
+                pass
+
+        uid = update.effective_user.id if update.effective_user else None
+        cid = update.effective_chat.id if update.effective_chat else None
+
+        if data == "m:j":
+            await ack()
+            await jobs_cmd(update, context)
+            return
+        if data == "m:h":
+            await ack()
+            await help_cmd(update, context)
+            return
+        if data == "m:s":
+            await ack()
+            context.user_data[UD_PENDING] = "status"
+            await q.message.reply_text("Reply with a job id (from /jobs), or send abort to cancel.")
+            return
+        if data == "m:c":
+            await ack()
+            context.user_data[UD_PENDING] = "cancel"
+            await q.message.reply_text("Reply with a job id to cancel, or send abort to cancel.")
+            return
+        if data == "m:r":
+            await ack()
+            context.user_data.pop(UD_RESERVE, None)
+            context.user_data[UD_PENDING] = "r_url"
+            await q.message.reply_text(
+                "Send your full BC Parks results URL (https://camping.bcparks.ca/create-booking/...).\n"
+                "You can still type a full /reserve … command manually anytime."
+            )
+            return
+
+        if data.startswith("j:c:"):
+            await ack()
+            jid = data[4:].strip()
+            ok = manager.cancel(jid)
+            audit_log("command_cancel", user_id=uid, chat_id=cid, job_id=jid, accepted=ok)
+            await q.message.reply_text(
+                "Cancellation requested for {}".format(jid) if ok else "Job {} not active".format(jid)
+            )
+            return
+        if data.startswith("j:s:"):
+            await ack()
+            jid = data[4:].strip()
+            audit_log(
+                "command_status",
+                user_id=uid,
+                chat_id=cid,
+                job_id=jid,
+                found=manager.get(jid) is not None,
+            )
+            await q.message.reply_text(_format_status_text(jid))
+            return
+        if data == "j:l":
+            await ack()
+            await jobs_cmd(update, context)
+            return
+
+        rb = context.user_data.get(UD_RESERVE)
+
+        if data == "r:x":
+            await ack()
+            _clear_user_flow(context)
+            await q.message.reply_text("Wizard cancelled.")
+            return
+        if data == "r:g":
+            await ack()
+            if not rb:
+                await q.message.reply_text("No URL in progress. Tap ⛺ /reserve.")
+                return
+            raw = reserve_state_to_shlex_raw(rb)
+            _clear_user_flow(context)
+            await _start_job(update, context, raw)
+            return
+        if data == "r:e":
+            await ack()
+            if not rb:
+                await q.message.reply_text("No URL in progress.")
+                return
+            raw = reserve_state_to_shlex_raw(rb)
+            _clear_user_flow(context)
+            await _start_job(update, context, raw)
+            return
+        if data == "r:m":
+            await ack()
+            if not rb:
+                await q.message.reply_text("No URL in progress.")
+                return
+            try:
+                await q.edit_message_text(
+                    "{}\n\nPick an option:".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_more_menu_keyboard(),
+                )
+            except Exception:
+                await q.message.reply_text(
+                    "{}\n\nPick an option:".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_more_menu_keyboard(),
+                )
+            return
+        if data == "r:b":
+            await ack()
+            if not rb:
+                await q.message.reply_text("Wizard expired.")
+                return
+            try:
+                await q.edit_message_text(
+                    "{}\n\nGo or More:".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_go_more_keyboard(),
+                )
+            except Exception:
+                await q.message.reply_text(
+                    "{}\n\nGo or More:".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_go_more_keyboard(),
+                )
+            return
+        if data == "r:z":
+            await ack()
+            if not rb or not rb.get("url"):
+                await q.message.reply_text("Nothing to reset.")
+                return
+            url = rb["url"]
+            context.user_data[UD_RESERVE] = _default_reserve_state(url)
+            rb = context.user_data[UD_RESERVE]
+            try:
+                await q.edit_message_text(
+                    "Reset options.\n\n{}".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_more_menu_keyboard(),
+                )
+            except Exception:
+                await q.message.reply_text(
+                    "Reset options.\n\n{}".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_more_menu_keyboard(),
+                )
+            return
+        if data == "r:o:f":
+            await ack()
+            if not rb:
+                await q.message.reply_text("Start the wizard from ⛺ /reserve.")
+                return
+            context.user_data[UD_PENDING] = "r_f"
+            await q.message.reply_text(
+                "Send preferred site labels comma-separated (e.g. S51,S52), or clear to remove --f."
+            )
+            return
+        if data == "r:o:i":
+            await ack()
+            if not rb:
+                return
+            context.user_data[UD_PENDING] = "r_i"
+            await q.message.reply_text("Send poll interval in seconds (e.g. 60). Minimum 5.")
+            return
+        if data == "r:o:w":
+            await ack()
+            if not rb:
+                return
+            rb["warmode"] = not rb.get("warmode")
+            try:
+                await q.edit_message_text(
+                    "{}\n\nPick an option:".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_more_menu_keyboard(),
+                )
+            except Exception:
+                await q.message.reply_text(
+                    "{}\n\nPick an option:".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_more_menu_keyboard(),
+                )
+            return
+        if data == "r:o:d":
+            await ack()
+            if not rb:
+                return
+            rb["debug"] = not rb.get("debug")
+            try:
+                await q.edit_message_text(
+                    "{}\n\nPick an option:".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_more_menu_keyboard(),
+                )
+            except Exception:
+                await q.message.reply_text(
+                    "{}\n\nPick an option:".format(format_reserve_command_preview(rb)),
+                    reply_markup=_reserve_more_menu_keyboard(),
+                )
+            return
+        if data == "r:o:t":
+            await ack()
+            if not rb:
+                return
+            context.user_data[UD_PENDING] = "r_tz"
+            await q.message.reply_text("Send IANA timezone (e.g. US/Pacific).")
+            return
+
+        await ack()
 
     app.add_error_handler(telegram_error_handler)
+    app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("reserve", reserve_cmd))
     app.add_handler(CommandHandler("jobs", jobs_cmd))
@@ -1401,79 +1748,7 @@ def run_telegram_bot(args):
 
 
 def main():
-    args = build_arg_parser().parse_args()
-
-    if args.telegram_bot:
-        run_telegram_bot(args)
-        return
-
-    if not args.url:
-        sys.exit("Error: --url/--u is required in CLI mode")
-
-    try:
-        validate_bcparks_booking_url(args.url)
-    except ValueError as e:
-        sys.exit("Invalid booking URL: {}".format(e))
-
-    client = None
-    if args.sms:
-        try:
-            from twilio.rest import Client
-
-            client = Client(args.twilio_sid, args.twilio_auth_token)
-        except ImportError:
-            sys.exit("Error: pip install twilio")
-
-    if args.remote_ip and args.remote_port:
-        driver = setup_webdriver_remote(args.remote_ip, args.remote_port)
-    else:
-        driver = setup_webdriver(headed=args.headed)
-
-    if not driver:
-        sys.exit("❌ WebDriver initialization failed.")
-
-    use_remote = bool(args.remote_ip and args.remote_port)
-
-    try:
-        if args.warmode:
-            reserved = reserve_war_mode(
-                driver,
-                args.url,
-                args.filter,
-                timezone=args.timezone,
-                debug=args.debug,
-                stop_event=None,
-            )
-        else:
-            reserved = reserve_normal_mode(
-                driver,
-                args.url,
-                args.filter,
-                interval=args.interval,
-                debug=args.debug,
-                stop_event=None,
-            )
-
-        if reserved:
-            pp("🎯 Reserved: {}".format(reserved))
-            if args.sms:
-                send_sms(
-                    "{} - 🎯 Reserved: {}\n{}".format(
-                        current_time(), reserved, shorten_url(args.url)
-                    ),
-                    client,
-                    args.my_phone_number,
-                    args.twilio_number,
-                )
-        else:
-            pp("❌ No reservation was successful")
-    except KeyboardInterrupt:
-        pp("🛑 Interrupted")
-    except Exception as e:
-        pp("❌ Unexpected error: {}".format(e))
-    finally:
-        if not use_remote:
-            driver.quit()
+    run_telegram_bot(build_telegram_arg_parser().parse_args())
 
 
 if __name__ == "__main__":
