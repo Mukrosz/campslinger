@@ -102,6 +102,7 @@ If you use **your** browser profile (already logged in), you may be able to cont
 ### monitor.py: what it does
 
 You give it the same long results URL as the other tools. It repeatedly queries the booking system’s **public API** and prints which sites are available. It **does not** open a browser or click the map.
+At startup it also resolves the park label from `resourceLocationId`; when found, terminal lines are prefixed with `[Park Name]`.
 
 ### monitor.py: prerequisites
 
@@ -117,9 +118,10 @@ You give it the same long results URL as the other tools. It repeatedly queries 
 ```bash
 ./monitor.py --url 'https://camping.bcparks.ca/create-booking/...'
 ./monitor.py --url '...' --f 'S51,S52' --i 30
+./monitor.py --url '...' --f 'S51,S52' --i 60 --jitter 10
 ```
 
-`--f` limits which site labels you care about; `--i` is the poll interval in seconds (default 60).
+`--f` limits which site labels you care about; `--i` is the base poll interval in seconds (default 60); `--jitter` adds random variance in seconds around `--i` (default 10, so `--i 60` gives 50 - 70s waits).
 
 ### monitor.py: optional SMS (Twilio)
 
@@ -153,6 +155,7 @@ Read **[Hold vs finishing your booking](#hold-vs-finishing-your-booking)** for w
 | **Warmode (`--warmode`)** | For the “opens at 7 a.m. Pacific” style window: about a minute before 7 it loads the map and prepares **Reserve**, then clicks at 7. See **[BC Parks - frontcountry camping](https://bcparks.ca/reservations/frontcountry-camping/)** for official rules. |
 
 **Why two steps?** In normal mode, the quick API check avoids loading the full map on every poll; the script only uses the heavy map flow when it is time to click.
+At startup, `reserve.py` also resolves park name from `resourceLocationId`; when available, terminal logs are prefixed with `[Park Name]`.
 
 ### reserve.py: prerequisites
 
@@ -172,6 +175,7 @@ Read **[Hold vs finishing your booking](#hold-vs-finishing-your-booking)** for w
 ```bash
 ./reserve.py --url 'https://camping.bcparks.ca/create-booking/...'
 ./reserve.py --url '...' --f 'S51,S52' --i 60
+./reserve.py --url '...' --f 'S51,S52' --i 60 --jitter 10
 ```
 
 `--f` is comma-separated; **order matters** (first matching free site is tried first).
@@ -186,6 +190,7 @@ Read **[Hold vs finishing your booking](#hold-vs-finishing-your-booking)** for w
 
 | Flag | Meaning |
 |------|--------|
+| `--jitter` | Random variance in seconds around `--i` in normal mode (default 10; `--i 60 --jitter 10` => each wait in 50 - 70s). |
 | `--headed` | Show a Chrome window (machine with a display; debugging). |
 | `--debug` | Extra logging; on map failure may write `reserve_map_failure.html` / `.png` in the cwd. |
 | `--rip` / `--rp` | Attach to your own Chrome with remote debugging (see below). |

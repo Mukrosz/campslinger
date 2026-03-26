@@ -6,6 +6,7 @@ Warmode uses Selenium only - prefetch at T-1 minute, click Reserve at 7:00 (no A
 
 import argparse
 import os
+import random
 import re
 import sys
 import time
@@ -34,6 +35,7 @@ BCPARKS_HEADERS = {
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     )
 }
+_PARK_NAME = None
 
 
 def sort_key(s):
@@ -53,9 +55,21 @@ def current_time():
 
 
 def pp(message, error=False):
+    park = _PARK_NAME.strip() if isinstance(_PARK_NAME, str) else ""
+    prefix = "[{}] ".format(park) if park else ""
     if error:
-        sys.exit("{} - {}".format(current_time(), message))
-    print("{} - {}".format(current_time(), message))
+        sys.exit("{} - {}{}".format(current_time(), prefix, message))
+    print("{} - {}{}".format(current_time(), prefix, message))
+
+
+def randomized_probe_wait_seconds(interval_seconds, jitter_seconds):
+    base = max(1, int(interval_seconds))
+    spread = max(0, int(jitter_seconds or 0))
+    if spread == 0:
+        return base
+    low = max(1, base - spread)
+    high = base + spread
+    return random.randint(low, high)
 
 
 def shorten_url(url):
@@ -128,6 +142,40 @@ def bcparks_fetch_sites_map(booking_url):
     r2 = requests.get(status_url, headers=BCPARKS_HEADERS, timeout=30)
     r2.raise_for_status()
     return bcparks_normalize_sites(r1.json(), r2.json())
+
+
+def bcparks_fetch_park_name(booking_url):
+    """
+    Best-effort park name lookup by resourceLocationId.
+    Returns None when not found or on any request/shape failure.
+    """
+    try:
+        p = bcparks_parse_url(booking_url, ["resourceLocationId"])
+        rid_str = p["resourceLocationId"]
+        rid_int = int(rid_str)
+        loc_url = "{}resourcelocation?resourceLocationId={}".format(
+            BCPARKS_API_BASE, rid_str
+        )
+        r = requests.get(loc_url, headers=BCPARKS_HEADERS, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        if not isinstance(data, list):
+            return None
+        for loc in data:
+            if not isinstance(loc, dict) or loc.get("resourceLocationId") != rid_int:
+                continue
+            locs = loc.get("localizedValues")
+            if not isinstance(locs, list) or not locs or not isinstance(locs[0], dict):
+                return None
+            first = locs[0]
+            for key in ("fullName", "shortName", "name", "value"):
+                v = first.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            return None
+    except Exception:
+        return None
+    return None
 
 
 def api_available_labels(sites):
@@ -349,17 +397,19 @@ def prepare_reservation(driver, available_sites, requested_sites, debug=False):
     return "", None
 
 
-def reserve_normal_mode(driver, url, requested_sites, interval, debug=False):
+def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=10, debug=False):
     """
-    One API poll per loop iteration (same pace as --interval). No extra requests.
+    One API poll per loop iteration. Wait between polls is randomized around --interval
+    by jitter seconds (default 10) to reduce strict periodic cadence.
     When API shows a target available, load the map once and click Reserve.
     """
     while True:
+        wait_s = randomized_probe_wait_seconds(interval, interval_jitter)
         try:
             sites = bcparks_fetch_sites_map(url)
         except Exception as e:
             pp("❌ API poll failed: {}".format(e))
-            time.sleep(interval)
+            time.sleep(wait_s)
             continue
 
         avail = api_available_labels(sites)
@@ -369,7 +419,7 @@ def reserve_normal_mode(driver, url, requested_sites, interval, debug=False):
             )
         else:
             pp("❌ No availability")
-            time.sleep(interval)
+            time.sleep(wait_s)
             continue
 
         target = pick_api_target(sites, requested_sites)
@@ -380,7 +430,7 @@ def reserve_normal_mode(driver, url, requested_sites, interval, debug=False):
                 )
             else:
                 pp("❌ Could not pick a target site; retrying…")
-            time.sleep(interval)
+            time.sleep(wait_s)
             continue
 
         label = sites[target].get("label", target)
@@ -390,9 +440,11 @@ def reserve_normal_mode(driver, url, requested_sites, interval, debug=False):
         if target not in on_map:
             pp(
                 "⚠️  API shows {} but map has no matching available icon yet; "
-                "waiting {}s…".format(label, interval)
+                "waiting {}s (base {}s, jitter ±{}s)…".format(
+                    wait_s, interval, max(0, int(interval_jitter or 0))
+                )
             )
-            time.sleep(interval)
+            time.sleep(wait_s)
             continue
 
         site, reserve_button = prepare_reservation(
@@ -422,7 +474,7 @@ def reserve_normal_mode(driver, url, requested_sites, interval, debug=False):
         else:
             pp("❌ Could not prepare reservation")
 
-        time.sleep(interval)
+        time.sleep(wait_s)
 
 
 def reserve_war_mode(driver, url, requested_sites, timezone="US/Pacific", debug=False):
@@ -530,6 +582,8 @@ def build_arg_parser():
         "    ./reserve.py --url '...' --f 'S51,S52,S53'\n\n"
         "  Poll every 30 seconds instead of 60.\n"
         "    ./reserve.py --url '...' --f 'S51' --interval 30\n\n"
+        "  Add jitter of 10s around interval (e.g. 50-70s when --i 60).\n"
+        "    ./reserve.py --url '...' --f 'S51' --interval 60 --jitter 10\n\n"
         "  Warmode at 7:00 Pacific (prefetch ~6:59).\n"
         "    ./reserve.py --url '...' --f 'S51' --warmode\n\n"
         "  Remote Chrome (log in first), then attach (ChromeDriver on PATH must match Chrome).\n"
@@ -571,6 +625,15 @@ def build_arg_parser():
         default=60,
         metavar="SECONDS",
         help="Seconds between API polls in normal mode (ignored in warmode).",
+    )
+    parser.add_argument(
+        "--jitter",
+        "--ij",
+        type=int,
+        default=10,
+        metavar="SECONDS",
+        help="Random variance in seconds around --interval in normal mode. "
+        "Example: --i 60 --jitter 10 => each wait in 50-70s.",
     )
     parser.add_argument(
         "--filter",
@@ -656,7 +719,9 @@ def build_arg_parser():
 
 
 def main():
+    global _PARK_NAME
     args = build_arg_parser().parse_args()
+    _PARK_NAME = bcparks_fetch_park_name(args.url)
 
     client = None
     if args.sms:
@@ -692,6 +757,7 @@ def main():
                 args.url,
                 args.filter,
                 interval=args.interval,
+                interval_jitter=args.jitter,
                 debug=args.debug,
             )
 

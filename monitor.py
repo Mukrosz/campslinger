@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 import argparse
+import random
 import re
 import requests
 import time
 import sys
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs, urlencode
+ 
+BCPARKS_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+}
 
 def shorten_url(url):
     """Convert long URLs to short """
@@ -112,6 +120,48 @@ def make_request(url, headers):
     return response
 
 
+def fetch_park_name(url):
+    """
+    Best-effort park name lookup by resourceLocationId.
+    Returns None when not found or on any request/shape failure.
+    """
+    try:
+        p = parse_url(url, ["resourceLocationId"])
+        rid_str = p["resourceLocationId"]
+        rid_int = int(rid_str)
+        loc_url = "https://camping.bcparks.ca/api/resourcelocation?resourceLocationId={}".format(
+            rid_str
+        )
+        data = requests.get(loc_url, headers=BCPARKS_HEADERS, timeout=30).json()
+        if not isinstance(data, list):
+            return None
+        for loc in data:
+            if not isinstance(loc, dict) or loc.get("resourceLocationId") != rid_int:
+                continue
+            locs = loc.get("localizedValues")
+            if not isinstance(locs, list) or not locs or not isinstance(locs[0], dict):
+                return None
+            first = locs[0]
+            for key in ("fullName", "shortName", "name", "value"):
+                v = first.get(key)
+                if isinstance(v, str) and v.strip():
+                    return v.strip()
+            return None
+    except Exception:
+        return None
+    return None
+
+
+def randomized_probe_wait_seconds(interval_seconds, jitter_seconds):
+    base = max(1, int(interval_seconds))
+    spread = max(0, int(jitter_seconds or 0))
+    if spread == 0:
+        return base
+    low = max(1, base - spread)
+    high = base + spread
+    return random.randint(low, high)
+
+
 if __name__ == '__main__':
 
     # PyShorter - TinyURL
@@ -131,6 +181,8 @@ if __name__ == '__main__':
                    "  ./monitor.py --u 'https://camping.bcparks.ca/create-booking...' --s \n\n"
                    "Check for site availability every 30s insead the default 60s: \n"
                    "  ./monitor.py --u 'https://camping.bcparks.ca/create-booking...' --s --i 30 \n\n"
+                   "Use jitter of 10s around interval (e.g. 50-70s when --i 60): \n"
+                   "  ./monitor.py --u 'https://camping.bcparks.ca/create-booking...' --i 60 --jitter 10 \n\n"
                    "Get an SMS notification when a site becomes available (requires Twilio account): \n"
                    "  ./monitor.py --u 'https://camping.bcparks.ca/create-booking...' --s --i 30 \\\n"
                    "                  --twilio_sid X --twilio_auth_token X --twilio_number X \\\n"
@@ -146,6 +198,12 @@ if __name__ == '__main__':
                          help     = 'Interval between checks in seconds',
                          type     = int,
                          default  = 60,
+                         required = False
+    )
+    parser.add_argument('--jitter', '--ij',
+                         help     = 'Random variance in seconds around --interval (default: 10)',
+                         type     = int,
+                         default  = 10,
                          required = False
     )
     parser.add_argument('--filter','--f',
@@ -193,7 +251,8 @@ if __name__ == '__main__':
     site_names_url  = '{}resourcelocation/resources?{}'.format(url_base, urlencode(site_name_params))
     site_status_url = '{}availability/map?{}'.format(url_base, urlencode(site_status_params))
 
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"}
+    headers = BCPARKS_HEADERS
+    park_name = fetch_park_name(args.url)
 
     try:
         while True:
@@ -206,18 +265,20 @@ if __name__ == '__main__':
             available_sites = get_available_sites(sites, args.filter if args.filter else list(sites.keys()))
 
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            prefix = '[{}] '.format(park_name) if park_name else ''
             if available_sites:
-                print('{} - Available sites: {}'.format(timestamp, ','.join(available_sites)))
+                print('{} - {}Available sites: {}'.format(timestamp, prefix, ','.join(available_sites)))
                 if args.sms:
-                    send_sms('{} - Available sites: {}\n{}'.format(timestamp, ','.join(available_sites), shorten_url(args.url)),
+                    send_sms('{} - {}Available sites: {}\n{}'.format(timestamp, prefix, ','.join(available_sites), shorten_url(args.url)),
                              client,
                              args.my_phone_number,
                              args.twilio_number
                     )
             else:
-                print('{} - No Availability'.format(timestamp))
+                print('{} - {}No availability'.format(timestamp, prefix))
 
-            time.sleep(args.interval)
+            wait_s = randomized_probe_wait_seconds(args.interval, args.jitter)
+            time.sleep(wait_s)
 
     except KeyboardInterrupt:
         print("Stopping the script.")
