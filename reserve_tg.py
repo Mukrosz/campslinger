@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import re
 import shlex
 import sys
@@ -110,10 +111,11 @@ def set_log_callback(callback):
     _LOGGER_LOCAL.callback = callback
 
 
-def set_telegram_job_meta(job_id, interval_seconds, park_name=None):
+def set_telegram_job_meta(job_id, interval_seconds, park_name=None, interval_jitter_seconds=0):
     """Per-job thread: job id, interval, optional park label; /cancel footer on poll messages."""
     _LOGGER_LOCAL.telegram_job_id = job_id
     _LOGGER_LOCAL.telegram_interval = int(interval_seconds)
+    _LOGGER_LOCAL.telegram_interval_jitter = max(0, int(interval_jitter_seconds or 0))
     _LOGGER_LOCAL.park_name = (park_name or "").strip() or None
     _LOGGER_LOCAL.poll_digest = None
 
@@ -147,11 +149,15 @@ def current_time():
 
 def _telegram_poll_footer():
     iv = getattr(_LOGGER_LOCAL, "telegram_interval", 60)
+    ij = getattr(_LOGGER_LOCAL, "telegram_interval_jitter", 0)
     jid = getattr(_LOGGER_LOCAL, "telegram_job_id", "") or ""
     cancel_line = "/cancel {}".format(jid) if jid else "/cancel"
+    cadence = "Polling about every {}s".format(iv)
+    if ij > 0:
+        cadence += " ({} - {}s)".format(max(1, iv - ij), iv + ij)
     return (
-        "\n\nPolling every {}s. To stop this job use respective Cancel button above or send:\n{}".format(
-            iv, cancel_line
+        "\n\n{}. To stop this job use respective Cancel button above or send:\n{}".format(
+            cadence, cancel_line
         )
     )
 
@@ -275,50 +281,47 @@ def bcparks_fetch_sites_map(booking_url):
 
 def bcparks_fetch_park_name(booking_url):
     """
-    Best-effort park / location label from the same resources API used for site names.
+    Best-effort park / location label using /api/resourcelocation?resourceLocationId=...
     Returns None if the response shape differs or the request fails.
     """
     try:
         validate_bcparks_booking_url(booking_url)
-        site_name_params = bcparks_parse_url(
-            booking_url, ["resourceLocationId", "mapId"]
+        p = bcparks_parse_url(booking_url, ["resourceLocationId"])
+        rid_str = p["resourceLocationId"]
+        rid_int = int(rid_str)
+        loc_url = "{}resourcelocation?resourceLocationId={}".format(
+            BCPARKS_API_BASE, rid_str
         )
-        names_url = "{}resourcelocation/resources?{}".format(
-            BCPARKS_API_BASE, urlencode(site_name_params)
-        )
-        r = requests.get(names_url, headers=BCPARKS_HEADERS, timeout=30)
+        r = requests.get(loc_url, headers=BCPARKS_HEADERS, timeout=30)
         r.raise_for_status()
         data = r.json()
-        if not isinstance(data, dict):
+        if not isinstance(data, list):
             return None
-        for key in (
-            "resourceLocationName",
-            "parkName",
-            "locationName",
-            "name",
-            "title",
-            "displayName",
-        ):
-            v = data.get(key)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        nested = data.get("resourceLocation") or data.get("location") or data.get("park")
-        if isinstance(nested, dict):
-            for key in ("name", "localizedName", "title", "displayName"):
-                v = nested.get(key)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-        # Some payloads nest under resourceLocationLocalizedValues
-        locs = data.get("resourceLocationLocalizedValues") or data.get("localizedValues")
-        if isinstance(locs, list) and locs:
+        for loc in data:
+            if not isinstance(loc, dict) or loc.get("resourceLocationId") != rid_int:
+                continue
+            locs = loc.get("localizedValues")
+            if not isinstance(locs, list) or not locs or not isinstance(locs[0], dict):
+                return None
             first = locs[0]
-            if isinstance(first, dict):
-                v = first.get("name") or first.get("value")
+            for key in ("fullName", "shortName", "name", "value"):
+                v = first.get(key)
                 if isinstance(v, str) and v.strip():
                     return v.strip()
+            return None
     except Exception:
         return None
     return None
+
+
+def randomized_probe_wait_seconds(interval_seconds, jitter_seconds):
+    base = max(1, int(interval_seconds))
+    spread = max(0, int(jitter_seconds or 0))
+    if spread == 0:
+        return base
+    low = max(1, base - spread)
+    high = base + spread
+    return random.randint(low, high)
 
 
 def api_available_labels(sites):
@@ -538,13 +541,15 @@ def prepare_reservation(driver, available_sites, requested_sites, debug=False):
 
 
 def reserve_normal_mode(
-    driver, url, requested_sites, interval, debug=False, stop_event=None
+    driver, url, requested_sites, interval, interval_jitter=10, debug=False, stop_event=None
 ):
     """
-    One API poll per loop iteration (same pace as --interval). No extra requests.
+    One API poll per loop iteration. Sleep between iterations is randomized around --interval
+    using jitter seconds (default 10), so cadence is less predictable.
     When API shows a target available, load the map once and click Reserve.
     """
     while True:
+        wait_s = randomized_probe_wait_seconds(interval, interval_jitter)
         if stop_event and stop_event.is_set():
             pp("🛑 Cancellation requested")
             return ""
@@ -555,19 +560,19 @@ def reserve_normal_mode(
                 "❌ API poll failed: {}".format(e),
                 telegram_digest=("api_err", str(e)[:220]),
             )
-            if stop_event and stop_event.wait(interval):
+            if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
                 return ""
-            time.sleep(0 if stop_event else interval)
+            time.sleep(0 if stop_event else wait_s)
             continue
 
         avail = api_available_labels(sites)
         if not avail:
             pp("❌ No Availability (API)", telegram_digest=("zero",))
-            if stop_event and stop_event.wait(interval):
+            if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
                 return ""
-            time.sleep(0 if stop_event else interval)
+            time.sleep(0 if stop_event else wait_s)
             continue
 
         target = pick_api_target(sites, requested_sites)
@@ -589,10 +594,10 @@ def reserve_normal_mode(
                     "❌ Could not pick a target site (API); retrying…".format(labels_csv),
                     telegram_digest=("no_pick_wait", frozenset(avail)),
                 )
-            if stop_event and stop_event.wait(interval):
+            if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
                 return ""
-            time.sleep(0 if stop_event else interval)
+            time.sleep(0 if stop_event else wait_s)
             continue
 
         # Proceeding to map: console-only avail line so poll_digest is not clobbered before a hit.
@@ -609,13 +614,15 @@ def reserve_normal_mode(
         if target not in on_map:
             pp(
                 "⚠️  API shows {} but map has no matching available icon yet; "
-                "waiting {}s…".format(label, interval),
+                "waiting {}s (base {}s, jitter ±{}s)…".format(
+                    wait_s, interval, max(0, int(interval_jitter or 0))
+                ),
                 telegram_digest=("map_wait", label),
             )
-            if stop_event and stop_event.wait(interval):
+            if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
                 return ""
-            time.sleep(0 if stop_event else interval)
+            time.sleep(0 if stop_event else wait_s)
             continue
 
         site, reserve_button = prepare_reservation(
@@ -648,10 +655,10 @@ def reserve_normal_mode(
                 telegram_digest=("prep_fail", label),
             )
 
-        if stop_event and stop_event.wait(interval):
+        if stop_event and stop_event.wait(wait_s):
             pp("🛑 Cancellation requested")
             return ""
-        time.sleep(0 if stop_event else interval)
+        time.sleep(0 if stop_event else wait_s)
 
 
 def reserve_war_mode(
@@ -866,6 +873,7 @@ def build_bot_reserve_parser():
     parser = _BotCommandParser(add_help=False)
     parser.add_argument("--url", "--u", dest="url", required=False)
     parser.add_argument("--interval", "--i", type=int, default=60)
+    parser.add_argument("--jitter", "--interval-jitter", "--ij", type=int, default=10)
     parser.add_argument("--filter", "--f", type=comma_separated_list, required=False)
     parser.add_argument("--sms", "--s", action="store_true", default=False)
     parser.add_argument("--twilio_sid", "--tsid", default="")
@@ -948,6 +956,7 @@ def _reserve_more_menu_keyboard():
         [
             [InlineKeyboardButton("Sites (--f)", callback_data="r:o:f")],
             [InlineKeyboardButton("Interval (--i)", callback_data="r:o:i")],
+            [InlineKeyboardButton("Jitter secs (--jitter)", callback_data="r:o:j")],
             [
                 InlineKeyboardButton("🌅 Warmode", callback_data="r:o:w"),
                 InlineKeyboardButton("🐛 Debug", callback_data="r:o:d"),
@@ -971,6 +980,7 @@ def _default_reserve_state(url):
     return {
         "url": url,
         "interval": 60,
+        "jitter": 10,
         "filter": None,
         "warmode": False,
         "debug": False,
@@ -990,6 +1000,9 @@ def format_reserve_command_preview(rb):
     iv = int(rb.get("interval") or 60)
     if iv != 60:
         parts.append("--i {}".format(iv))
+    jv = max(0, int(rb.get("jitter") if rb.get("jitter") is not None else 10))
+    if jv != 10:
+        parts.append("--jitter {}".format(jv))
     if rb.get("warmode"):
         parts.append("--warmode")
     if rb.get("debug"):
@@ -1012,6 +1025,10 @@ def reserve_state_to_shlex_raw(rb):
     if iv != 60:
         chunks.append("--i")
         chunks.append(str(iv))
+    jv = max(0, int(rb.get("jitter") if rb.get("jitter") is not None else 10))
+    if jv != 10:
+        chunks.append("--jitter")
+        chunks.append(str(jv))
     if rb.get("warmode"):
         chunks.append("--warmode")
     if rb.get("debug"):
@@ -1043,7 +1060,12 @@ def _run_job(job, manager, bot, loop):
 
     set_log_callback(_tg)
     park = bcparks_fetch_park_name(job.args.url)
-    set_telegram_job_meta(job.job_id, job.args.interval, park_name=park)
+    set_telegram_job_meta(
+        job.job_id,
+        job.args.interval,
+        park_name=park,
+        interval_jitter_seconds=getattr(job.args, "jitter", 0),
+    )
     args = job.args
     client = None
     if args.sms:
@@ -1096,6 +1118,7 @@ def _run_job(job, manager, bot, loop):
                 args.url,
                 args.filter,
                 interval=args.interval,
+                interval_jitter=args.jitter,
                 debug=args.debug,
                 stop_event=job.stop_event,
             )
@@ -1175,7 +1198,7 @@ def _run_job(job, manager, bot, loop):
 def telegram_help_text():
     return (
         "Campslinger Telegram commands\n\n"
-        "/reserve <url> [--f S51,S52] [--i 60] [--warmode] [--timezone US/Pacific] [--debug] [--sms + Twilio flags]\n"
+        "/reserve <url> [--f S51,S52] [--i 60] [--jitter 10] [--warmode] [--timezone US/Pacific] [--debug] [--sms + Twilio flags]\n"
         "/jobs\n"
         "/status <job_id>\n"
         "/cancel <job_id>\n"
@@ -1527,6 +1550,24 @@ def run_telegram_bot(args):
             )
             return
 
+        if pend == "r_j":
+            context.user_data.pop(UD_PENDING, None)
+            rb = context.user_data.get(UD_RESERVE)
+            if not rb:
+                await _tg_reply(update, "Wizard expired.")
+                return
+            try:
+                rb["jitter"] = max(0, int(txt.split()[0]))
+            except ValueError:
+                await _tg_reply(update, "Send jitter seconds as a non-negative integer (e.g. 10).")
+                return
+            await _tg_reply(
+                update,
+                "Updated.\n\n{}\n\n".format(format_reserve_command_preview(rb)),
+                reply_markup=_reserve_more_menu_keyboard(),
+            )
+            return
+
         if pend == "r_tz":
             context.user_data.pop(UD_PENDING, None)
             rb = context.user_data.get(UD_RESERVE)
@@ -1719,6 +1760,15 @@ def run_telegram_bot(args):
                 return
             context.user_data[UD_PENDING] = "r_i"
             await q.message.reply_text("Send poll interval in seconds (e.g. 60). Minimum 5.")
+            return
+        if data == "r:o:j":
+            await ack()
+            if not rb:
+                return
+            context.user_data[UD_PENDING] = "r_j"
+            await q.message.reply_text(
+                "Send jitter in seconds (e.g. 10). Each probe wait will vary in [interval-jitter, interval+jitter]."
+            )
             return
         if data == "r:o:w":
             await ack()

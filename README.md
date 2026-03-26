@@ -345,6 +345,7 @@ Put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` in `telegram.env` with 
 | Flag | Meaning |
 |------|--------|
 | `--max-concurrent N` | Max parallel reservation jobs (default **3**). |
+| `--jitter N` / `--interval-jitter N` | Poll variance in **seconds** for normal mode jobs (default **10**). With `--i 60 --jitter 10`, each probe waits in **50 - 70s**. |
 | `--no-terminal-log` | Stop printing per-job lines on the **server** terminal; Telegram logging unchanged. |
 
 ### reserve_tg.py: Telegram user guide
@@ -359,7 +360,7 @@ Put `TELEGRAM_BOT_TOKEN` and `TELEGRAM_ALLOWED_USER_IDS` in `telegram.env` with 
 
 - **`/jobs`**, **`/help`**: run immediately.  
 - **`/status`** / **`/cancel`**: the bot asks for the **job id**; reply with that id (e.g. from `/jobs` or from a previous message).  
-- **`/reserve`**: guided flow - enter the **booking URL** first, then **Go** (URL + sensible defaults) or **More** (step through options with a live preview of the `/reserve …` command). You can still type a full **`/reserve https://… --f S51 --i 60`** manually if you prefer.
+- **`/reserve`**: guided flow - enter the **booking URL** first, then **Go** (URL + sensible defaults) or **More** (step through options with a live preview of the `/reserve …` command). You can still type a full **`/reserve https://… --f S51 --i 60 --jitter 10`** manually if you prefer.
 
 **Plain URL message:** a message that is **only** your `https://camping.bcparks.ca/create-booking/...` URL starts a default normal-mode job (same idea as a quick **Go**).
 
@@ -373,7 +374,7 @@ Use **`/reserve@YourBot`** if Telegram inserts the bot name; that form is suppor
 
 ### reserve_tg.py: park name in messages
 
-When the API returns a resolvable park name, log lines mirrored to Telegram are prefixed with **`[park]`** so you can confirm the correct park.
+At job start, the bot looks up park metadata from `resourceLocationId` and, when resolvable, prefixes log lines mirrored to Telegram with **`[park]`** so you can confirm you are monitoring the right park.
 
 ### reserve_tg.py: security notes
 
