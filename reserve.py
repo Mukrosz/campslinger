@@ -365,10 +365,10 @@ def reserve_normal_mode(driver, url, requested_sites, interval, debug=False):
         avail = api_available_labels(sites)
         if avail:
             pp(
-                "✨ Available sites (API): {}".format(",".join(avail))
+                "✨ Available sites: {}".format(",".join(avail))
             )
         else:
-            pp("❌ No Availability (API)")
+            pp("❌ No availability")
             time.sleep(interval)
             continue
 
@@ -376,13 +376,10 @@ def reserve_normal_mode(driver, url, requested_sites, interval, debug=False):
         if not target:
             if requested_sites:
                 pp(
-                    "❌ None of your preferred sites are free (API). "
-                    "Prefer: {} - currently available listed above.".format(
-                        ",".join(requested_sites)
-                    )
+                    "❌ None of your preferred sites ({}) are free.".format(",".join(requested_sites))
                 )
             else:
-                pp("❌ Could not pick a target site (API); retrying…")
+                pp("❌ Could not pick a target site; retrying…")
             time.sleep(interval)
             continue
 

@@ -568,7 +568,7 @@ def reserve_normal_mode(
 
         avail = api_available_labels(sites)
         if not avail:
-            pp("❌ No Availability (API)", telegram_digest=("zero",))
+            pp("❌ No availability", telegram_digest=("zero",))
             if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
                 return ""
@@ -582,16 +582,16 @@ def reserve_normal_mode(
                 # Single digest for "have availability, not our sites" so we do not alternate
                 # digests with a separate avail line every poll (which re-sent Telegram every interval).
                 pp(
-                    "✨ Available sites (API): {}\n"
-                    "❌ None of your preferred sites are free (API). Prefer: {} - currently available listed above.".format(
+                    "✨ Available sites: {}\n"
+                    "❌ None of your preferred sites ({}) are free.".format(
                         labels_csv, ",".join(requested_sites)
                     ),
                     telegram_digest=("filter_wait", frozenset(avail), tuple(requested_sites)),
                 )
             else:
                 pp(
-                    "✨ Available sites (API): {}\n"
-                    "❌ Could not pick a target site (API); retrying…".format(labels_csv),
+                    "✨ Available sites: {}\n"
+                    "❌ Could not pick a target site; retrying…".format(labels_csv),
                     telegram_digest=("no_pick_wait", frozenset(avail)),
                 )
             if stop_event and stop_event.wait(wait_s):
@@ -602,7 +602,7 @@ def reserve_normal_mode(
 
         # Proceeding to map: console-only avail line so poll_digest is not clobbered before a hit.
         pp(
-            "✨ Available sites (API): {}".format(",".join(sorted(avail, key=sort_key))),
+            "✨ Available sites: {}".format(",".join(sorted(avail, key=sort_key))),
             skip_telegram=True,
         )
         label = sites[target].get("label", target)
