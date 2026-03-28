@@ -249,15 +249,15 @@ UD_MONITOR = "csl_monitor"
 def _main_menu_keyboard():
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📡 Monitor", callback_data="m:mo")],
         [
             InlineKeyboardButton("📋 /jobs", callback_data="m:j"),
             InlineKeyboardButton("🔎 /status", callback_data="m:s"),
         ],
         [
             InlineKeyboardButton("🛑 /cancel", callback_data="m:c"),
-            InlineKeyboardButton("📡 Monitor", callback_data="m:mo"),
+            InlineKeyboardButton("❓ /help", callback_data="m:h"),
         ],
-        [InlineKeyboardButton("❓ /help", callback_data="m:h")],
     ])
 
 
@@ -288,11 +288,14 @@ def _monitor_more_menu_keyboard(rb):
     reserve_on = rb.get("reserve", False)
     reserve_label = "⛺ Reserve: ON" if reserve_on else "⛺ Reserve: off"
     loop_label = "🔄 Loop: {}".format(rb.get("loop", "continuous"))
-    sms_label = "📱 SMS / Twilio{}".format(" ✓" if rb.get("sms") else "")
+    sms_label = "📱 SMS: {}".format("ON" if rb.get("sms") else "off")
+    sites_val = ",".join(rb["filter"]) if rb.get("filter") else "All"
+    iv = int(rb.get("interval") or 60)
+    jv = max(0, int(rb.get("jitter") if rb.get("jitter") is not None else 10))
     rows = [
-        [InlineKeyboardButton("🎯 Sites (--f)", callback_data="r:o:f")],
-        [InlineKeyboardButton("⏱ Interval (--i)", callback_data="r:o:i")],
-        [InlineKeyboardButton("🎲 Jitter (--jitter)", callback_data="r:o:j")],
+        [InlineKeyboardButton("🎯 Sites: {}".format(sites_val), callback_data="r:o:f")],
+        [InlineKeyboardButton("⏱ Interval: {}s".format(iv), callback_data="r:o:i")],
+        [InlineKeyboardButton("🎲 Jitter: {}s".format(jv), callback_data="r:o:j")],
         [InlineKeyboardButton(reserve_label, callback_data="r:o:rv")],
         [InlineKeyboardButton(loop_label, callback_data="r:o:l")],
         [InlineKeyboardButton(sms_label, callback_data="r:o:sms")],
@@ -483,18 +486,21 @@ def _run_monitor_job(job, manager, bot, loop):
                               job_id=job.job_id, status="done", url=args.url, job_kind="monitor")
                     set_log_callback(None)
                     return
+                _send_telegram_text(bot, loop, job.chat_id,
+                                    "📡 Monitoring again in ~{}s".format(wait_s))
             elif not all_avail:
-                pp("No availability", telegram_digest=("zero",))
+                pp("No availability. Checking again in ~{}s".format(wait_s), telegram_digest=("zero",))
             else:
                 labels_csv = ",".join(sorted(all_avail, key=sort_key))
-                pp("✨ Available sites: {}\n❌ None of your preferred sites ({}) are free.".format(
-                    labels_csv, ",".join(args.filter or [])),
+                pp("✨ Available: {}\n❌ None of your preferred sites ({}) are free. Checking again in ~{}s".format(
+                    labels_csv, ",".join(args.filter or []), wait_s),
                     telegram_digest=("filter_wait", frozenset(all_avail), tuple(args.filter or ())))
             if job.stop_event.wait(wait_s):
                 break
 
         if job.stop_event.is_set():
             manager.mark_done(job.job_id, "cancelled")
+            _bot_console_line("Job {} cancelled (monitor) user={}".format(job.job_id, job.user_id))
             _send_telegram_text(bot, loop, job.chat_id, "🛑 Job {} cancelled".format(job.job_id))
             audit_log("job_finished", user_id=job.user_id, chat_id=job.chat_id,
                       job_id=job.job_id, status="cancelled", url=args.url, job_kind="monitor")
@@ -556,6 +562,7 @@ def _run_reserve_job(job, manager, bot, loop):
                 debug=args.debug, stop_event=job.stop_event)
         if job.stop_event.is_set():
             manager.mark_done(job.job_id, "cancelled")
+            _bot_console_line("Job {} cancelled (reserve) user={}".format(job.job_id, job.user_id))
             _send_telegram_text(bot, loop, job.chat_id, "🛑 Job {} cancelled".format(job.job_id))
             audit_log("job_finished", user_id=job.user_id, chat_id=job.chat_id,
                       job_id=job.job_id, status="cancelled", url=args.url)
