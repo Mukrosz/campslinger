@@ -14,70 +14,45 @@ import argparse
 import asyncio
 import json
 import os
-import random
-import re
 import shlex
 import sys
 import threading
-import time
 import traceback
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
-from urllib.parse import parse_qs, urlencode, urlparse
 
-import requests
-from selenium import webdriver
-from selenium.common.exceptions import (
-    NoSuchElementException,
-    StaleElementReferenceException,
-    TimeoutException,
-    WebDriverException,
+from campslinger.core import (
+    api_available_labels,
+    bcparks_fetch_park_name,
+    bcparks_fetch_sites_map,
+    labels_available_matching_filter,
 )
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.ui import WebDriverWait
-from webdriver_manager.chrome import ChromeDriverManager
+from campslinger.log import (
+    _TERMINAL_LOG_ENABLED,
+    _bot_console_line,
+    pp,
+    set_log_callback,
+    set_telegram_job_meta,
+    set_terminal_log_enabled,
+)
+from campslinger.reserve_modes import reserve_normal_mode, reserve_war_mode
+from campslinger.selenium_ops import setup_webdriver, setup_webdriver_remote
+from campslinger.util import (
+    comma_separated_list,
+    current_time,
+    randomized_probe_wait_seconds,
+    send_sms,
+    shorten_url,
+    sort_key,
+    validate_bcparks_booking_url,
+)
 
-BCPARKS_API_BASE = "https://camping.bcparks.ca/api/"
-_BCPARKS_BOOKING_HOST = "camping.bcparks.ca"
-_BCPARKS_BOOKING_PATH_PREFIX = "/create-booking/"
-BCPARKS_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    )
-}
-
-_LOGGER_LOCAL = threading.local()
-_TERMINAL_LOG_ENABLED = True
 _REMOTE_CHROME = None
 _audit_lock = threading.Lock()
 _audit_write_warned = False
-
-
-def validate_bcparks_booking_url(url):
-    if not url or not isinstance(url, str):
-        raise ValueError("Missing booking URL")
-    u = url.strip()
-    p = urlparse(u)
-    if (p.scheme or "").lower() != "https":
-        raise ValueError("Booking URL must use https")
-    host = (p.hostname or "").lower()
-    if host != _BCPARKS_BOOKING_HOST:
-        raise ValueError("Booking URL must be on camping.bcparks.ca")
-    path = p.path or ""
-    if not path.startswith(_BCPARKS_BOOKING_PATH_PREFIX):
-        raise ValueError("Booking URL path must start with {}".format(_BCPARKS_BOOKING_PATH_PREFIX))
-    if p.username or p.password:
-        raise ValueError("Booking URL must not contain embedded credentials")
-    if p.port not in (None, 443):
-        raise ValueError("Booking URL must use default HTTPS port")
-    return u
 
 
 def audit_log(action, user_id=None, chat_id=None, **fields):
@@ -104,530 +79,8 @@ def audit_log(action, user_id=None, chat_id=None, **fields):
             print("Warning: audit log write failed: {}".format(e), file=sys.stderr, flush=True)
 
 
-def set_log_callback(callback):
-    _LOGGER_LOCAL.callback = callback
-
-
-def set_telegram_job_meta(job_id, interval_seconds, park_name=None, interval_jitter_seconds=0):
-    _LOGGER_LOCAL.telegram_job_id = job_id
-    _LOGGER_LOCAL.telegram_interval = int(interval_seconds)
-    _LOGGER_LOCAL.telegram_interval_jitter = max(0, int(interval_jitter_seconds or 0))
-    _LOGGER_LOCAL.park_name = (park_name or "").strip() or None
-    _LOGGER_LOCAL.poll_digest = None
-
-
-def set_terminal_log_enabled(enabled):
-    global _TERMINAL_LOG_ENABLED
-    _TERMINAL_LOG_ENABLED = bool(enabled)
-
-
-def _bot_console_line(message):
-    if _TERMINAL_LOG_ENABLED:
-        print("{} - {}".format(current_time(), message), flush=True)
-
-
-def sort_key(s):
-    match = re.match(r"([A-Za-z]*)(\d+)([A-Za-z]*)", s.strip())
-    if match:
-        prefix, number, suffix = match.groups()
-        return (prefix, int(number), suffix)
-    return (s, 0, "")
-
-
-def comma_separated_list(value):
-    return [item.strip().lower() for item in value.split(",")]
-
-
-def current_time():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def _telegram_poll_footer():
-    iv = getattr(_LOGGER_LOCAL, "telegram_interval", 60)
-    ij = getattr(_LOGGER_LOCAL, "telegram_interval_jitter", 0)
-    jid = getattr(_LOGGER_LOCAL, "telegram_job_id", "") or ""
-    cancel_line = "/cancel {}".format(jid) if jid else "/cancel"
-    cadence = "Polling about every {}s".format(iv)
-    if ij > 0:
-        cadence += " ({} - {}s)".format(max(1, iv - ij), iv + ij)
-    return (
-        "\n\n{}. To stop this job use respective Cancel button above or send:\n{}".format(
-            cadence, cancel_line
-        )
-    )
-
-
-def pp(message, error=False, telegram_digest=None, skip_telegram=False):
-    park = getattr(_LOGGER_LOCAL, "park_name", None)
-    if park:
-        line = "{} - [{}] {}".format(current_time(), park, message)
-    else:
-        line = "{} - {}".format(current_time(), message)
-    callback = getattr(_LOGGER_LOCAL, "callback", None)
-    if callback and not skip_telegram:
-        send_telegram = True
-        if telegram_digest is not None:
-            last = getattr(_LOGGER_LOCAL, "poll_digest", object())
-            if last == telegram_digest:
-                send_telegram = False
-            else:
-                _LOGGER_LOCAL.poll_digest = telegram_digest
-        if send_telegram:
-            text = line
-            if telegram_digest is not None and telegram_digest[0] in (
-                "zero",
-                "filter_miss",
-                "filter_wait",
-                "no_pick",
-                "no_pick_wait",
-                "map_wait",
-            ):
-                text += _telegram_poll_footer()
-            try:
-                callback(text)
-            except Exception:
-                pass
-    elif not callback and telegram_digest is not None and not skip_telegram:
-        _LOGGER_LOCAL.poll_digest = telegram_digest
-    if error:
-        sys.exit(line)
-    if _TERMINAL_LOG_ENABLED:
-        print(line, flush=True)
-
-
-def shorten_url(url):
-    try:
-        import pyshorteners
-        return pyshorteners.Shortener().tinyurl.short(url)
-    except Exception:
-        return url
-
-
-def send_sms(message, client, to_number, from_number):
-    msg = client.messages.create(to=to_number, from_=from_number, body=message)
-    pp("SMS sent: {}".format(msg.sid))
-
-
-def debug_screenshot(driver, path, message="Debug screenshot saved"):
-    try:
-        driver.save_screenshot(path)
-        pp("\U0001f4f8 {}: {}".format(message, path))
-    except Exception as e:
-        pp("\u26a0\ufe0f  Screenshot failed ({}): {}".format(path, e))
-
-
-def bcparks_parse_url(url, params):
-    try:
-        url_params = parse_qs(urlparse(url).query)
-        url_params = {key: url_params[key][0] for key in params if key in url_params}
-        if len(url_params) != len(params):
-            missing = set(params) - set(url_params.keys())
-            raise ValueError("Missing params: {}".format(missing))
-    except Exception as e:
-        raise ValueError("Invalid URL: {}".format(e)) from e
-    return url_params
-
-
-def bcparks_normalize_sites(n_dict, a_dict):
-    merged = {}
-    for key in a_dict.get("resourceAvailabilities", {}):
-        name = n_dict[key].get("localizedValues", {})[0].get("name", "")
-        status = (
-            a_dict.get("resourceAvailabilities", {})
-            .get(key, {})[0]
-            .get("availability", "")
-        )
-        label = name.strip()
-        merged[label.lower()] = {"status": status, "id": key, "label": label}
-    return {k: merged[k] for k in sorted(merged, key=sort_key)}
-
-
-def bcparks_fetch_sites_map(booking_url):
-    validate_bcparks_booking_url(booking_url)
-    site_name_params = bcparks_parse_url(booking_url, ["resourceLocationId", "mapId"])
-    site_status_params = bcparks_parse_url(booking_url, ["mapId", "startDate", "endDate"])
-    names_url = "{}resourcelocation/resources?{}".format(BCPARKS_API_BASE, urlencode(site_name_params))
-    status_url = "{}availability/map?{}".format(BCPARKS_API_BASE, urlencode(site_status_params))
-    r1 = requests.get(names_url, headers=BCPARKS_HEADERS, timeout=30)
-    r1.raise_for_status()
-    r2 = requests.get(status_url, headers=BCPARKS_HEADERS, timeout=30)
-    r2.raise_for_status()
-    return bcparks_normalize_sites(r1.json(), r2.json())
-
-
-def bcparks_fetch_park_name(booking_url):
-    try:
-        validate_bcparks_booking_url(booking_url)
-        p = bcparks_parse_url(booking_url, ["resourceLocationId"])
-        rid_str = p["resourceLocationId"]
-        rid_int = int(rid_str)
-        loc_url = "{}resourcelocation?resourceLocationId={}".format(BCPARKS_API_BASE, rid_str)
-        r = requests.get(loc_url, headers=BCPARKS_HEADERS, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        if not isinstance(data, list):
-            return None
-        for loc in data:
-            if not isinstance(loc, dict) or loc.get("resourceLocationId") != rid_int:
-                continue
-            locs = loc.get("localizedValues")
-            if not isinstance(locs, list) or not locs or not isinstance(locs[0], dict):
-                return None
-            first = locs[0]
-            for key in ("fullName", "shortName", "name", "value"):
-                v = first.get(key)
-                if isinstance(v, str) and v.strip():
-                    return v.strip()
-            return None
-    except Exception:
-        return None
-    return None
-
-
-def randomized_probe_wait_seconds(interval_seconds, jitter_seconds):
-    base = max(1, int(interval_seconds))
-    spread = max(0, int(jitter_seconds or 0))
-    if spread == 0:
-        return base
-    low = max(1, base - spread)
-    high = base + spread
-    return random.randint(low, high)
-
-
-def api_available_labels(sites):
-    labels = []
-    for key in sorted(sites.keys(), key=sort_key):
-        if sites[key].get("status") == 0:
-            labels.append(sites[key].get("label", key))
-    return labels
-
-
-def pick_api_target(sites, requested_sites):
-    if not sites:
-        return None
-    if requested_sites:
-        pool = requested_sites
-    else:
-        pool = list(sites.keys())
-    for key in pool:
-        if key in sites and sites[key].get("status") == 0:
-            return key
-    return None
-
-
-def labels_available_matching_filter(sites, requested_sites):
-    out = []
-    for key in sorted(sites.keys(), key=sort_key):
-        if sites[key].get("status") != 0:
-            continue
-        if requested_sites and key not in requested_sites:
-            continue
-        out.append(sites[key].get("label", key))
-    return out
-
-
-def setup_webdriver():
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--log-level=3")
-    options.add_argument("--window-size=1920,1400")
-    options.add_argument("--user-agent={}".format(BCPARKS_HEADERS["User-Agent"]))
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    try:
-        driver = webdriver.Chrome(
-            service=ChromeService(ChromeDriverManager().install()), options=options
-        )
-        driver.set_page_load_timeout(120)
-        try:
-            driver.execute_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-        except Exception:
-            pass
-        return driver
-    except WebDriverException as e:
-        pp("❌ WebDriver failed to start: {}".format(e))
-        return None
-
-
-def setup_webdriver_remote(ip, port):
-    options = Options()
-    options.add_experimental_option("debuggerAddress", "{}:{}".format(ip, port))
-    try:
-        driver = webdriver.Chrome(options=options)
-        driver.set_page_load_timeout(120)
-        try:
-            driver.execute_script(
-                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-            )
-        except Exception:
-            pass
-        return driver
-    except WebDriverException as e:
-        pp("❌ Failed to connect to existing Chrome instance: {}".format(e))
-        return None
-
-
-def _dump_map_load_failure(driver, debug):
-    try:
-        pp("   Diagnostic: title={!r}".format(driver.title))
-        pp("   Current URL: {}".format(driver.current_url))
-        n_mc = len(driver.find_elements(By.CSS_SELECTOR, ".map-container"))
-        n_mi = len(driver.find_elements(By.CLASS_NAME, "map-icon"))
-        pp("   Elements: .map-container={}  .map-icon={}".format(n_mc, n_mi))
-    except Exception as e:
-        pp("   Could not inspect page: {}".format(e))
-    if not debug:
-        pp("   Re-run with --debug to save reserve_map_failure.html and reserve_map_failure.png here.")
-        return
-    html_path = os.path.join(os.getcwd(), "reserve_map_failure.html")
-    png_path = os.path.join(os.getcwd(), "reserve_map_failure.png")
-    try:
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(driver.page_source)
-        pp("   Wrote {}".format(html_path))
-    except Exception as e:
-        pp("   Could not write HTML: {}".format(e))
-    debug_screenshot(driver, png_path, message="Map load failure screenshot")
-
-
-def get_available_sites(driver, url, max_attempts=5, retry_delay=1, debug=False, stop_event=None):
-    for attempt in range(max_attempts):
-        if stop_event and stop_event.is_set():
-            pp("🛑 Cancellation requested")
-            return {}
-        available = {}
-        try:
-            pp("⏳ Scanning map for available sites (attempt {}/{})...".format(attempt + 1, max_attempts))
-            driver.get(url)
-            WebDriverWait(driver, 90).until(
-                lambda d: (
-                    len(d.find_elements(By.CSS_SELECTOR, ".map-container")) > 0
-                    or len(d.find_elements(By.CLASS_NAME, "map-icon")) > 0
-                )
-            )
-            WebDriverWait(driver, 90).until(
-                lambda d: len(d.find_elements(By.CLASS_NAME, "map-icon")) > 0
-            )
-            stable_count = 0
-            last_count = 0
-            for _ in range(12):
-                if stop_event and stop_event.is_set():
-                    pp("🛑 Cancellation requested")
-                    return {}
-                icons = driver.find_elements(By.CLASS_NAME, "map-icon")
-                count = len(icons)
-                if count == last_count:
-                    stable_count += 1
-                    if stable_count >= 2:
-                        break
-                else:
-                    stable_count = 0
-                    last_count = count
-                time.sleep(0.5)
-            icons = driver.find_elements(By.CLASS_NAME, "map-icon")
-            for i, icon in enumerate(icons):
-                try:
-                    if "icon-available" not in (icon.get_attribute("class") or ""):
-                        continue
-                    label_el = icon.find_element(
-                        By.XPATH,
-                        './following-sibling::*[contains(@class, "map-site-label")]',
-                    )
-                    label_text = (
-                        label_el.find_element(By.CLASS_NAME, "resource-label")
-                        .text.strip()
-                        .lower()
-                    )
-                    if label_text:
-                        available[label_text] = icon
-                except (StaleElementReferenceException, NoSuchElementException):
-                    continue
-            if available:
-                pp("✨ Map reports {} available site(s): {}".format(
-                    len(available), ",".join(sorted(available.keys(), key=sort_key))))
-            return available
-        except TimeoutException:
-            pp("❌ Timeout waiting for map or map icons")
-            _dump_map_load_failure(driver, debug)
-        except WebDriverException as e:
-            pp("❌ WebDriver error: {}".format(e))
-            break
-        except Exception as e:
-            pp("❌ Unexpected error: {}".format(e))
-        time.sleep(retry_delay)
-    pp("❌ Failed to read map after {} attempts".format(max_attempts))
-    return {}
-
-
-def collect_available_icons_from_map(driver, url, debug=False, stop_event=None):
-    return get_available_sites(driver, url, max_attempts=3, retry_delay=1, debug=debug, stop_event=stop_event)
-
-
-def prepare_reservation(driver, available_sites, requested_sites, debug=False):
-    available_site_names = list(available_sites.keys())
-    requested_sites = requested_sites if requested_sites else available_site_names
-    for site in requested_sites:
-        if site in available_sites:
-            try:
-                pp("✅ Clicking site icon: {}".format(site))
-                driver.execute_script("arguments[0].click();", available_sites[site])
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, "side-bar-container"))
-                )
-                reserve_buttons = WebDriverWait(driver, 15).until(
-                    EC.presence_of_all_elements_located((By.ID, "addToStay"))
-                )
-                if reserve_buttons:
-                    reserve_button = reserve_buttons[-1]
-                    if debug:
-                        debug_screenshot(driver, os.path.join(os.getcwd(), "ss-after_clicking_site.png"))
-                    return site, reserve_button
-            except Exception as e:
-                pp("⚠️  Skipped site {} due to: {}".format(site, e))
-    pp("❌ None of the preferred sites are available on the map")
-    return "", None
-
-
-def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=10, debug=False, stop_event=None):
-    while True:
-        wait_s = randomized_probe_wait_seconds(interval, interval_jitter)
-        if stop_event and stop_event.is_set():
-            pp("🛑 Cancellation requested")
-            return ""
-        try:
-            sites = bcparks_fetch_sites_map(url)
-        except Exception as e:
-            pp("❌ API poll failed: {}".format(e), telegram_digest=("api_err", str(e)[:220]))
-            if stop_event and stop_event.wait(wait_s):
-                pp("🛑 Cancellation requested")
-                return ""
-            time.sleep(0 if stop_event else wait_s)
-            continue
-        avail = api_available_labels(sites)
-        if not avail:
-            pp("❌ No availability", telegram_digest=("zero",))
-            if stop_event and stop_event.wait(wait_s):
-                pp("🛑 Cancellation requested")
-                return ""
-            time.sleep(0 if stop_event else wait_s)
-            continue
-        target = pick_api_target(sites, requested_sites)
-        if not target:
-            labels_csv = ",".join(sorted(avail, key=sort_key))
-            if requested_sites:
-                pp("✨ Available sites: {}\n❌ None of your preferred sites ({}) are free.".format(
-                    labels_csv, ",".join(requested_sites)),
-                    telegram_digest=("filter_wait", frozenset(avail), tuple(requested_sites)))
-            else:
-                pp("✨ Available sites: {}\n❌ Could not pick a target site; retrying…".format(labels_csv),
-                    telegram_digest=("no_pick_wait", frozenset(avail)))
-            if stop_event and stop_event.wait(wait_s):
-                pp("🛑 Cancellation requested")
-                return ""
-            time.sleep(0 if stop_event else wait_s)
-            continue
-        pp("✨ Available sites: {}".format(",".join(sorted(avail, key=sort_key))), skip_telegram=True)
-        label = sites[target].get("label", target)
-        pp("🎯 Trying map + Reserve for: {} …".format(label))
-        on_map = collect_available_icons_from_map(driver, url, debug=debug, stop_event=stop_event)
-        if target not in on_map:
-            pp("⚠️  API shows {} but map has no matching available icon yet; waiting {}s…".format(
-                label, wait_s), telegram_digest=("map_wait", label))
-            if stop_event and stop_event.wait(wait_s):
-                pp("🛑 Cancellation requested")
-                return ""
-            time.sleep(0 if stop_event else wait_s)
-            continue
-        site, reserve_button = prepare_reservation(driver, on_map, [target], debug=debug)
-        if site and reserve_button:
-            try:
-                driver.execute_script("arguments[0].scrollIntoView(true);", reserve_button)
-                if debug:
-                    debug_screenshot(driver, os.path.join(os.getcwd(), "ss-before_clicking_reserve.png"))
-                driver.execute_script("arguments[0].click();", reserve_button)
-                pp("✅ Clicked the Reserve button")
-                time.sleep(5)
-                if debug:
-                    debug_screenshot(driver, os.path.join(os.getcwd(), "ss-after_clicking_reserve.png"))
-                return site
-            except Exception as e:
-                pp("❌ Failed to click reserve button: {}".format(e))
-        else:
-            pp("❌ Could not prepare reservation", telegram_digest=("prep_fail", label))
-        if stop_event and stop_event.wait(wait_s):
-            pp("🛑 Cancellation requested")
-            return ""
-        time.sleep(0 if stop_event else wait_s)
-
-
-def reserve_war_mode(driver, url, requested_sites, timezone="US/Pacific", debug=False, stop_event=None):
-    try:
-        import pytz
-        from datetime import timedelta
-    except ImportError:
-        sys.exit("Error: pytz module not found. Install with `pip install pytz`")
-
-    def wait_until(target_time):
-        while True:
-            if stop_event and stop_event.is_set():
-                return False
-            now = datetime.now(tz=target_time.tzinfo)
-            if now >= target_time:
-                return True
-            time.sleep(min(0.05, (target_time - now).total_seconds()))
-
-    tz = pytz.timezone(timezone)
-    now = datetime.now(tz)
-    target_time = now.replace(hour=7, minute=0, second=0, microsecond=0)
-    if now >= target_time:
-        target_time += timedelta(days=1)
-
-    def fmt_ampm(dt):
-        try:
-            return dt.strftime("%-I:%M%p")
-        except ValueError:
-            return dt.strftime("%I:%M%p").lstrip("0")
-
-    pp("⚔️  Warmode: prefetch at {} US/Pacific (07:00 window)…".format(
-        fmt_ampm(target_time - timedelta(minutes=1))))
-    if not wait_until(target_time - timedelta(minutes=1)):
-        pp("🛑 Cancellation requested")
-        return ""
-    available_sites = get_available_sites(driver, url, debug=debug, stop_event=stop_event)
-    if not available_sites:
-        pp("❌ No available sites on map at prefetch time")
-        return ""
-    site, reserve_button = prepare_reservation(driver, available_sites, requested_sites, debug=debug)
-    if not site or not reserve_button:
-        pp("❌ Could not prepare reservation (prefetch)")
-        return ""
-    pp("✅ Prefetch done. Waiting to click Reserve for {} at {}…".format(site, fmt_ampm(target_time)))
-    if not wait_until(target_time):
-        pp("🛑 Cancellation requested")
-        return ""
-    try:
-        driver.execute_script("arguments[0].scrollIntoView(true);", reserve_button)
-        if debug:
-            debug_screenshot(driver, os.path.join(os.getcwd(), "ss-before_clicking_reserve.png"))
-        driver.execute_script("arguments[0].click();", reserve_button)
-        pp("✅ Clicked the Reserve button")
-        time.sleep(5)
-        if debug:
-            debug_screenshot(driver, os.path.join(os.getcwd(), "ss-after_clicking_reserve.png"))
-        return site
-    except Exception as e:
-        pp("❌ Failed to click reserve button at {}: {}".format(fmt_ampm(target_time), e))
-        return ""
-
-
 # ---------------------------------------------------------------------------
-# Job state / manager (unchanged from reserve_tg.py)
+# Job state / manager
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -836,7 +289,6 @@ def _monitor_more_menu_keyboard(rb):
     reserve_label = "⛺ Reserve: ON" if reserve_on else "⛺ Reserve: off"
     loop_label = "🔄 Loop: {}".format(rb.get("loop", "continuous"))
     sms_label = "📱 SMS / Twilio{}".format(" ✓" if rb.get("sms") else "")
-
     rows = [
         [InlineKeyboardButton("🎯 Sites (--f)", callback_data="r:o:f")],
         [InlineKeyboardButton("⏱ Interval (--i)", callback_data="r:o:i")],
@@ -847,14 +299,8 @@ def _monitor_more_menu_keyboard(rb):
     ]
     if reserve_on:
         rows.append([
-            InlineKeyboardButton(
-                "🌅 Warmode{}".format(" ✓" if rb.get("warmode") else ""),
-                callback_data="r:o:w",
-            ),
-            InlineKeyboardButton(
-                "🐛 Debug{}".format(" ✓" if rb.get("debug") else ""),
-                callback_data="r:o:d",
-            ),
+            InlineKeyboardButton("🌅 Warmode{}".format(" ✓" if rb.get("warmode") else ""), callback_data="r:o:w"),
+            InlineKeyboardButton("🐛 Debug{}".format(" ✓" if rb.get("debug") else ""), callback_data="r:o:d"),
         ])
     rows.append([InlineKeyboardButton("▶ Run", callback_data="r:e")])
     rows.append([
@@ -904,19 +350,10 @@ def _clear_user_flow(context):
 
 def _default_monitor_state(url):
     return {
-        "url": url,
-        "interval": 60,
-        "jitter": 10,
-        "filter": None,
-        "reserve": False,
-        "loop": "continuous",
-        "warmode": False,
-        "debug": False,
-        "sms": False,
-        "twilio_sid": "",
-        "twilio_auth_token": "",
-        "twilio_number": "",
-        "my_phone_number": "",
+        "url": url, "interval": 60, "jitter": 10, "filter": None,
+        "reserve": False, "loop": "continuous", "warmode": False, "debug": False,
+        "sms": False, "twilio_sid": "", "twilio_auth_token": "",
+        "twilio_number": "", "my_phone_number": "",
     }
 
 
@@ -946,21 +383,17 @@ def format_monitor_command_preview(rb):
 def monitor_state_to_shlex_raw(rb):
     chunks = [shlex.quote(rb["url"])]
     if rb.get("filter"):
-        chunks.append("--f")
-        chunks.append(shlex.quote(",".join(rb["filter"])))
+        chunks.extend(["--f", shlex.quote(",".join(rb["filter"]))])
     iv = int(rb.get("interval") or 60)
     if iv != 60:
-        chunks.append("--i")
-        chunks.append(str(iv))
+        chunks.extend(["--i", str(iv)])
     jv = max(0, int(rb.get("jitter") if rb.get("jitter") is not None else 10))
     if jv != 10:
-        chunks.append("--jitter")
-        chunks.append(str(jv))
+        chunks.extend(["--jitter", str(jv)])
     if rb.get("reserve"):
         chunks.append("--reserve")
     if rb.get("loop", "continuous") != "continuous":
-        chunks.append("--loop")
-        chunks.append(rb["loop"])
+        chunks.extend(["--loop", rb["loop"]])
     if rb.get("warmode"):
         chunks.append("--warmode")
     if rb.get("debug"):
@@ -996,17 +429,13 @@ def _send_telegram_text(bot, loop, chat_id, text, reply_markup=None):
 
 
 def _run_monitor_job(job, manager, bot, loop):
-    """API-only monitoring; optional SMS. No Selenium."""
     def _tg(line):
         _send_telegram_text(bot, loop, job.chat_id, line)
 
     set_log_callback(_tg)
     park = bcparks_fetch_park_name(job.args.url)
-    set_telegram_job_meta(
-        job.job_id, job.args.interval,
-        park_name=park,
-        interval_jitter_seconds=getattr(job.args, "jitter", 0),
-    )
+    set_telegram_job_meta(job.job_id, job.args.interval, park_name=park,
+                          interval_jitter_seconds=getattr(job.args, "jitter", 0))
     args = job.args
     client = None
     if args.sms:
@@ -1034,13 +463,10 @@ def _run_monitor_job(job, manager, bot, loop):
                 if job.stop_event.wait(wait_s):
                     break
                 continue
-
             matching = labels_available_matching_filter(sites, args.filter)
             all_avail = api_available_labels(sites)
-
             if matching:
-                line = "✅ Available sites: {}".format(",".join(matching))
-                pp(line, telegram_digest=None)
+                pp("✅ Available sites: {}".format(",".join(matching)), telegram_digest=None)
                 if args.sms and client:
                     try:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1064,7 +490,6 @@ def _run_monitor_job(job, manager, bot, loop):
                 pp("✨ Available sites: {}\n❌ None of your preferred sites ({}) are free.".format(
                     labels_csv, ",".join(args.filter or [])),
                     telegram_digest=("filter_wait", frozenset(all_avail), tuple(args.filter or ())))
-
             if job.stop_event.wait(wait_s):
                 break
 
@@ -1086,17 +511,13 @@ def _run_monitor_job(job, manager, bot, loop):
 
 
 def _run_reserve_job(job, manager, bot, loop):
-    """Selenium reservation job (same as reserve_tg.py _run_job)."""
     def _tg(line):
         _send_telegram_text(bot, loop, job.chat_id, line)
 
     set_log_callback(_tg)
     park = bcparks_fetch_park_name(job.args.url)
-    set_telegram_job_meta(
-        job.job_id, job.args.interval,
-        park_name=park,
-        interval_jitter_seconds=getattr(job.args, "jitter", 0),
-    )
+    set_telegram_job_meta(job.job_id, job.args.interval, park_name=park,
+                          interval_jitter_seconds=getattr(job.args, "jitter", 0))
     args = job.args
     client = None
     if args.sms:
@@ -1133,14 +554,12 @@ def _run_reserve_job(job, manager, bot, loop):
                 driver, args.url, args.filter,
                 interval=args.interval, interval_jitter=args.jitter,
                 debug=args.debug, stop_event=job.stop_event)
-
         if job.stop_event.is_set():
             manager.mark_done(job.job_id, "cancelled")
             _send_telegram_text(bot, loop, job.chat_id, "🛑 Job {} cancelled".format(job.job_id))
             audit_log("job_finished", user_id=job.user_id, chat_id=job.chat_id,
                       job_id=job.job_id, status="cancelled", url=args.url)
             return
-
         if reserved_site:
             if args.sms and client:
                 send_sms("{} - 🎯 Reserved: {}\n{}".format(
@@ -1268,9 +687,6 @@ def run_telegram_bot(args):
                 except Exception:
                     pass
 
-    # -------------------------------------------------------------------
-    # _start_job: unified entry point
-    # -------------------------------------------------------------------
     async def _start_job(update, context, raw):
         if not authorized(update):
             await reject(update)
@@ -1295,10 +711,8 @@ def run_telegram_bot(args):
             await _tg_reply(update, "Server busy: max {} concurrent jobs reached.".format(manager.max_concurrent))
             return
         audit_log("job_queued", user_id=job.user_id, chat_id=job.chat_id,
-                  job_id=job.job_id, url=job_args.url,
-                  job_kind=job_args.job_kind,
-                  reserve=bool(job_args.reserve),
-                  loop=job_args.loop,
+                  job_id=job.job_id, url=job_args.url, job_kind=job_args.job_kind,
+                  reserve=bool(job_args.reserve), loop=job_args.loop,
                   warmode=bool(getattr(job_args, "warmode", False)),
                   interval=job_args.interval,
                   filter=",".join(job_args.filter) if job_args.filter else "")
@@ -1313,9 +727,8 @@ def run_telegram_bot(args):
             mode = "reserve{}".format(" (warmode)" if job_args.warmode else "")
         await _tg_reply(update, "Started job {}\nkind={}\nmode={}\nfilter={}".format(
             job.job_id, job_args.job_kind, mode, ",".join(job_args.filter or [])))
-        cid = update.effective_chat.id
         await context.bot.send_message(
-            chat_id=cid,
+            chat_id=update.effective_chat.id,
             text="Job {} - quick actions while it runs:".format(job.job_id),
             reply_markup=_job_control_keyboard(job.job_id))
 
@@ -1328,9 +741,6 @@ def run_telegram_bot(args):
             job.status, job.started_at, job.ended_at or "-",
             job.result_site or "-", job.error or "-")
 
-    # -------------------------------------------------------------------
-    # Command handlers
-    # -------------------------------------------------------------------
     async def help_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
             await reject(update)
@@ -1339,10 +749,8 @@ def run_telegram_bot(args):
         _bot_console_line("/help user={}".format(uid if uid is not None else "?"))
         audit_log("command_help", user_id=uid, chat_id=update.effective_chat.id if update.effective_chat else None)
         await _tg_reply(update, telegram_help_text())
-        await context.bot.send_message(
-            chat_id=update.effective_chat.id,
-            text="Quick actions (tap a button):",
-            reply_markup=_main_menu_keyboard())
+        await context.bot.send_message(chat_id=update.effective_chat.id,
+                                       text="Quick actions (tap a button):", reply_markup=_main_menu_keyboard())
 
     async def monitor_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -1363,11 +771,9 @@ def run_telegram_bot(args):
                       chat_id=update.effective_chat.id if update.effective_chat else None)
             context.user_data.pop(UD_MONITOR, None)
             context.user_data[UD_PENDING] = "r_url"
-            await _tg_reply(
-                update,
-                "Send your full BC Parks results URL, or type a full /monitor … command.\n\n{}".format(
-                    telegram_help_text()),
-                reply_markup=_main_menu_keyboard())
+            await _tg_reply(update,
+                            "Send your full BC Parks results URL, or type a full /monitor … command.\n\n{}".format(
+                                telegram_help_text()), reply_markup=_main_menu_keyboard())
             return
         await _start_job(update, context, raw)
 
@@ -1425,9 +831,6 @@ def run_telegram_bot(args):
         else:
             await _tg_reply(update, "Job {} not active or not yours".format(jid))
 
-    # -------------------------------------------------------------------
-    # Text handler (wizard text inputs + bare URLs)
-    # -------------------------------------------------------------------
     async def text_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
             await reject(update)
@@ -1475,11 +878,10 @@ def run_telegram_bot(args):
             context.user_data.pop(UD_PENDING, None)
             context.user_data[UD_MONITOR] = _default_monitor_state(txt)
             rb = context.user_data[UD_MONITOR]
-            await _tg_reply(
-                update,
-                "URL saved.\n\nCurrent command:\n{}\n\n▶️ Go = run with defaults.\n⚙️ More = sites, interval, reserve, loop, SMS …".format(
-                    format_monitor_command_preview(rb)),
-                reply_markup=_monitor_go_more_keyboard())
+            await _tg_reply(update,
+                            "URL saved.\n\nCurrent command:\n{}\n\n▶️ Go = run with defaults.\n⚙️ More = sites, interval, reserve, loop, SMS …".format(
+                                format_monitor_command_preview(rb)),
+                            reply_markup=_monitor_go_more_keyboard())
             return
 
         if pend == "r_f":
@@ -1492,10 +894,8 @@ def run_telegram_bot(args):
                 rb["filter"] = comma_separated_list(txt)
             else:
                 rb["filter"] = None
-            await _tg_reply(update,
-                            "Updated.\n\n{}\n\nUse More to change more options or Run.".format(
-                                format_monitor_command_preview(rb)),
-                            reply_markup=_monitor_more_menu_keyboard(rb))
+            await _tg_reply(update, "Updated.\n\n{}\n\nUse More to change more options or Run.".format(
+                format_monitor_command_preview(rb)), reply_markup=_monitor_more_menu_keyboard(rb))
             return
 
         if pend == "r_i":
@@ -1509,8 +909,7 @@ def run_telegram_bot(args):
             except ValueError:
                 await _tg_reply(update, "Send a number of seconds (e.g. 60), or open More again.")
                 return
-            await _tg_reply(update,
-                            "Updated.\n\n{}".format(format_monitor_command_preview(rb)),
+            await _tg_reply(update, "Updated.\n\n{}".format(format_monitor_command_preview(rb)),
                             reply_markup=_monitor_more_menu_keyboard(rb))
             return
 
@@ -1525,8 +924,7 @@ def run_telegram_bot(args):
             except ValueError:
                 await _tg_reply(update, "Send jitter seconds as a non-negative integer (e.g. 10).")
                 return
-            await _tg_reply(update,
-                            "Updated.\n\n{}".format(format_monitor_command_preview(rb)),
+            await _tg_reply(update, "Updated.\n\n{}".format(format_monitor_command_preview(rb)),
                             reply_markup=_monitor_more_menu_keyboard(rb))
             return
 
@@ -1540,9 +938,8 @@ def run_telegram_bot(args):
                          "r_tn": "twilio_number", "r_mpn": "my_phone_number"}
             rb[field_map[pend]] = txt.strip()
             try:
-                await update.effective_message.reply_text(
-                    "Saved.\n\nSMS settings:",
-                    reply_markup=_sms_submenu_keyboard(rb))
+                await update.effective_message.reply_text("Saved.\n\nSMS settings:",
+                                                         reply_markup=_sms_submenu_keyboard(rb))
             except Exception:
                 await _tg_reply(update, "Saved.")
             return
@@ -1554,9 +951,6 @@ def run_telegram_bot(args):
         audit_log("text_message", user_id=uid, chat_id=cid, preview=txt[:200])
         await _tg_reply(update, "Send /help, a booking URL, or use the buttons from the last help message.")
 
-    # -------------------------------------------------------------------
-    # Callback handler (main menu, job controls, wizard)
-    # -------------------------------------------------------------------
     async def callback_handler(update, context: ContextTypes.DEFAULT_TYPE):
         q = update.callback_query
         if not q:
@@ -1574,16 +968,18 @@ def run_telegram_bot(args):
 
         uid = update.effective_user.id if update.effective_user else None
         cid = update.effective_chat.id if update.effective_chat else None
+        rb = context.user_data.get(UD_MONITOR)
 
-        # --- main menu ---
+        async def _edit_or_reply(text, markup):
+            try:
+                await q.edit_message_text(text, reply_markup=markup)
+            except Exception:
+                await q.message.reply_text(text, reply_markup=markup)
+
         if data == "m:j":
-            await ack()
-            await jobs_cmd(update, context)
-            return
+            await ack(); await jobs_cmd(update, context); return
         if data == "m:h":
-            await ack()
-            await help_cmd(update, context)
-            return
+            await ack(); await help_cmd(update, context); return
         if data == "m:s":
             await ack()
             context.user_data[UD_PENDING] = "status"
@@ -1602,16 +998,13 @@ def run_telegram_bot(args):
                 "Send your full BC Parks results URL (https://camping.bcparks.ca/create-booking/...).\n"
                 "You can still type a full /monitor … command manually anytime.")
             return
-
-        # --- job control ---
         if data.startswith("j:c:"):
             await ack()
             jid = data[4:].strip()
             ok = manager.cancel_for_user(jid, uid)
             audit_log("command_cancel", user_id=uid, chat_id=cid, job_id=jid, accepted=ok)
             await q.message.reply_text(
-                "Cancellation requested for {}".format(jid) if ok
-                else "Job {} not active or not yours".format(jid))
+                "Cancellation requested for {}".format(jid) if ok else "Job {} not active or not yours".format(jid))
             return
         if data.startswith("j:s:"):
             await ack()
@@ -1621,24 +1014,9 @@ def run_telegram_bot(args):
             await q.message.reply_text(_format_status_text(jid, uid))
             return
         if data == "j:l":
-            await ack()
-            await jobs_cmd(update, context)
-            return
-
-        # --- wizard ---
-        rb = context.user_data.get(UD_MONITOR)
-
-        async def _edit_or_reply(text, markup):
-            try:
-                await q.edit_message_text(text, reply_markup=markup)
-            except Exception:
-                await q.message.reply_text(text, reply_markup=markup)
-
+            await ack(); await jobs_cmd(update, context); return
         if data == "r:x":
-            await ack()
-            _clear_user_flow(context)
-            await q.message.reply_text("Wizard cancelled.")
-            return
+            await ack(); _clear_user_flow(context); await q.message.reply_text("Wizard cancelled."); return
         if data in ("r:g", "r:e"):
             await ack()
             if not rb:
@@ -1653,18 +1031,16 @@ def run_telegram_bot(args):
             if not rb:
                 await q.message.reply_text("No URL in progress.")
                 return
-            await _edit_or_reply(
-                "{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
-                _monitor_more_menu_keyboard(rb))
+            await _edit_or_reply("{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
+                                _monitor_more_menu_keyboard(rb))
             return
         if data == "r:b":
             await ack()
             if not rb:
                 await q.message.reply_text("Wizard expired.")
                 return
-            await _edit_or_reply(
-                "{}\n\nGo or More:".format(format_monitor_command_preview(rb)),
-                _monitor_go_more_keyboard())
+            await _edit_or_reply("{}\n\nGo or More:".format(format_monitor_command_preview(rb)),
+                                _monitor_go_more_keyboard())
             return
         if data == "r:z":
             await ack()
@@ -1674,12 +1050,9 @@ def run_telegram_bot(args):
             url = rb["url"]
             context.user_data[UD_MONITOR] = _default_monitor_state(url)
             rb = context.user_data[UD_MONITOR]
-            await _edit_or_reply(
-                "Reset options.\n\n{}".format(format_monitor_command_preview(rb)),
-                _monitor_more_menu_keyboard(rb))
+            await _edit_or_reply("Reset options.\n\n{}".format(format_monitor_command_preview(rb)),
+                                _monitor_more_menu_keyboard(rb))
             return
-
-        # --- wizard: option buttons ---
         if data == "r:o:f":
             await ack()
             if not rb:
@@ -1690,51 +1063,40 @@ def run_telegram_bot(args):
             return
         if data == "r:o:i":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             context.user_data[UD_PENDING] = "r_i"
             await q.message.reply_text("Send poll interval in seconds (e.g. 60). Minimum 5.")
             return
         if data == "r:o:j":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             context.user_data[UD_PENDING] = "r_j"
             await q.message.reply_text("Send jitter in seconds (e.g. 10).")
             return
         if data == "r:o:rv":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             rb["reserve"] = not rb.get("reserve", False)
-            await _edit_or_reply(
-                "{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
-                _monitor_more_menu_keyboard(rb))
+            await _edit_or_reply("{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
+                                _monitor_more_menu_keyboard(rb))
             return
         if data == "r:o:w":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             rb["warmode"] = not rb.get("warmode")
-            await _edit_or_reply(
-                "{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
-                _monitor_more_menu_keyboard(rb))
+            await _edit_or_reply("{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
+                                _monitor_more_menu_keyboard(rb))
             return
         if data == "r:o:d":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             rb["debug"] = not rb.get("debug")
-            await _edit_or_reply(
-                "{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
-                _monitor_more_menu_keyboard(rb))
+            await _edit_or_reply("{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
+                                _monitor_more_menu_keyboard(rb))
             return
-
-        # --- Loop submenu ---
         if data == "r:o:l":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             cur = rb.get("loop", "continuous")
             await _edit_or_reply(
                 "What to do after first availability hit?\n\nCurrent: {}\n\n"
@@ -1743,82 +1105,64 @@ def run_telegram_bot(args):
             return
         if data == "r:l:c":
             await ack()
-            if rb:
-                rb["loop"] = "continuous"
-            await _edit_or_reply(
-                "{}\n\nPick an option:".format(format_monitor_command_preview(rb or {})),
-                _monitor_more_menu_keyboard(rb or {}))
+            if rb: rb["loop"] = "continuous"
+            await _edit_or_reply("{}\n\nPick an option:".format(format_monitor_command_preview(rb or {})),
+                                _monitor_more_menu_keyboard(rb or {}))
             return
         if data == "r:l:o":
             await ack()
-            if rb:
-                rb["loop"] = "once"
-            await _edit_or_reply(
-                "{}\n\nPick an option:".format(format_monitor_command_preview(rb or {})),
-                _monitor_more_menu_keyboard(rb or {}))
+            if rb: rb["loop"] = "once"
+            await _edit_or_reply("{}\n\nPick an option:".format(format_monitor_command_preview(rb or {})),
+                                _monitor_more_menu_keyboard(rb or {}))
             return
         if data == "r:l:bk":
             await ack()
             if rb:
-                await _edit_or_reply(
-                    "{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
-                    _monitor_more_menu_keyboard(rb))
+                await _edit_or_reply("{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
+                                    _monitor_more_menu_keyboard(rb))
             return
-
-        # --- SMS / Twilio submenu ---
         if data == "r:o:sms":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             await _edit_or_reply("SMS / Twilio settings:", _sms_submenu_keyboard(rb))
             return
         if data == "r:s:tog":
             await ack()
-            if rb:
-                rb["sms"] = not rb.get("sms", False)
+            if rb: rb["sms"] = not rb.get("sms", False)
             await _edit_or_reply("SMS / Twilio settings:", _sms_submenu_keyboard(rb or {}))
             return
         if data == "r:s:sid":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             context.user_data[UD_PENDING] = "r_tsid"
             await q.message.reply_text("Send your Twilio Account SID:")
             return
         if data == "r:s:at":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             context.user_data[UD_PENDING] = "r_tat"
             await q.message.reply_text("Send your Twilio Auth Token:")
             return
         if data == "r:s:tn":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             context.user_data[UD_PENDING] = "r_tn"
             await q.message.reply_text("Send your Twilio phone number (e.g. +1234567890):")
             return
         if data == "r:s:mpn":
             await ack()
-            if not rb:
-                return
+            if not rb: return
             context.user_data[UD_PENDING] = "r_mpn"
             await q.message.reply_text("Send your phone number to receive SMS (e.g. +1234567890):")
             return
         if data == "r:s:bk":
             await ack()
             if rb:
-                await _edit_or_reply(
-                    "{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
-                    _monitor_more_menu_keyboard(rb))
+                await _edit_or_reply("{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
+                                    _monitor_more_menu_keyboard(rb))
             return
-
         await ack()
 
-    # -------------------------------------------------------------------
-    # Register handlers and start
-    # -------------------------------------------------------------------
     app.add_error_handler(telegram_error_handler)
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(CommandHandler("help", help_cmd))
