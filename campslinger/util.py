@@ -6,12 +6,26 @@ import sys
 from datetime import datetime
 from urllib.parse import urlparse
 
-_BCPARKS_BOOKING_HOST = "camping.bcparks.ca"
-_BCPARKS_BOOKING_PATH_PREFIX = "/create-booking/"
+SUPPORTED_PARK_HOSTS = (
+    "camping.bcparks.ca",
+    "reservations.ontarioparks.ca",
+    "reservation.pc.gc.ca",
+    "camping.manitobaparks.com",
+    "camping.novascotia.ca",
+    "camping.nbbparks.ca",
+    "camping.nlcamping.ca",
+    "yukon.goingtocamp.com",
+    "midnrreservations.com",
+    "parkreservations.maryland.gov",
+    "mississippi.goingtocamp.com",
+    "nebraska.goingtocamp.com",
+)
+
+_BOOKING_PATH_PREFIX = "/create-booking/"
 
 
-def validate_bcparks_booking_url(url):
-    """Reject non-BC-Parks URLs (SSRF hardening)."""
+def validate_booking_url(url):
+    """Reject URLs not on a known Aspira/GoingToCamp park platform (SSRF hardening)."""
     if not url or not isinstance(url, str):
         raise ValueError("Missing booking URL")
     u = url.strip()
@@ -19,16 +33,24 @@ def validate_bcparks_booking_url(url):
     if (p.scheme or "").lower() != "https":
         raise ValueError("Booking URL must use https")
     host = (p.hostname or "").lower()
-    if host != _BCPARKS_BOOKING_HOST:
-        raise ValueError("Booking URL must be on camping.bcparks.ca")
+    if host not in SUPPORTED_PARK_HOSTS:
+        raise ValueError(
+            "Unsupported park host: {}. Supported: {}".format(
+                host, ", ".join(SUPPORTED_PARK_HOSTS)))
     path = p.path or ""
-    if not path.startswith(_BCPARKS_BOOKING_PATH_PREFIX):
-        raise ValueError("Booking URL path must start with {}".format(_BCPARKS_BOOKING_PATH_PREFIX))
+    if not path.startswith(_BOOKING_PATH_PREFIX):
+        raise ValueError("Booking URL path must start with {}".format(_BOOKING_PATH_PREFIX))
     if p.username or p.password:
         raise ValueError("Booking URL must not contain embedded credentials")
     if p.port not in (None, 443):
         raise ValueError("Booking URL must use default HTTPS port")
     return u
+
+
+def api_base_from_url(booking_url):
+    """Derive the API base (e.g. https://host/api/) from a booking URL."""
+    p = urlparse(booking_url.strip())
+    return "https://{}/api/".format(p.hostname.lower())
 
 
 def sort_key(s):

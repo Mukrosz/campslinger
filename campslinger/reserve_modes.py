@@ -7,7 +7,7 @@ from datetime import datetime
 
 from campslinger.core import (
     api_available_labels,
-    bcparks_fetch_sites_map,
+    fetch_sites_map,
     pick_api_target,
 )
 from campslinger.log import pp
@@ -29,7 +29,7 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
             pp("🛑 Cancellation requested")
             return ""
         try:
-            sites = bcparks_fetch_sites_map(url)
+            sites = fetch_sites_map(url)
         except Exception as e:
             pp("❌ API poll failed: {}".format(e), telegram_digest=("api_err", str(e)[:220]))
             if stop_event and stop_event.wait(wait_s):

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-Campslinger Telegram bot (campslinger_tg.py): BC Parks monitoring and optional reservation.
+Campslinger Telegram bot (campslinger_tg.py): campsite monitoring and optional reservation.
+
+Works with any park on the Aspira / GoingToCamp platform (BC Parks, Ontario Parks,
+Parks Canada, Manitoba, Nova Scotia, New Brunswick, NL, Yukon, Michigan, Maryland,
+Mississippi, Nebraska, and more).
 
 Primary action is /monitor (API-only polling with notifications).  The "Reserve" toggle
 in the wizard's More menu enables Selenium reservation on hit.  "Loop" controls whether
@@ -26,8 +30,8 @@ from typing import Optional
 
 from campslinger.core import (
     api_available_labels,
-    bcparks_fetch_park_name,
-    bcparks_fetch_sites_map,
+    fetch_park_name,
+    fetch_sites_map,
     labels_available_matching_filter,
 )
 from campslinger.log import (
@@ -47,7 +51,7 @@ from campslinger.util import (
     send_sms,
     shorten_url,
     sort_key,
-    validate_bcparks_booking_url,
+    validate_booking_url,
 )
 
 _REMOTE_CHROME = None
@@ -186,7 +190,7 @@ class JobManager:
 
 def build_telegram_arg_parser():
     p = argparse.ArgumentParser(
-        description="Campslinger Telegram bot: BC Parks monitoring and optional reservation."
+        description="Campslinger Telegram bot: campsite monitoring and optional reservation."
     )
     p.add_argument("--max-concurrent", type=int, default=3, help="Max concurrent jobs.")
     p.add_argument("--no-terminal-log", action="store_false", dest="terminal_log", default=True,
@@ -233,7 +237,7 @@ def parse_bot_monitor_args(raw_text):
     args = parser.parse_args(tokens)
     if not args.url:
         raise ValueError("Missing URL. Usage: /monitor <url> [--f S51 --i 60 --reserve --loop once ...]")
-    validate_bcparks_booking_url(args.url)
+    validate_booking_url(args.url)
     args.job_kind = "reserve" if args.reserve else "monitor"
     return args
 
@@ -436,7 +440,7 @@ def _run_monitor_job(job, manager, bot, loop):
         _send_telegram_text(bot, loop, job.chat_id, line)
 
     set_log_callback(_tg)
-    park = bcparks_fetch_park_name(job.args.url)
+    park = fetch_park_name(job.args.url)
     set_telegram_job_meta(job.job_id, job.args.interval, park_name=park,
                           interval_jitter_seconds=getattr(job.args, "jitter", 0))
     args = job.args
@@ -460,7 +464,7 @@ def _run_monitor_job(job, manager, bot, loop):
                 break
             wait_s = randomized_probe_wait_seconds(args.interval, args.jitter)
             try:
-                sites = bcparks_fetch_sites_map(args.url)
+                sites = fetch_sites_map(args.url)
             except Exception as e:
                 pp("❌ API poll failed: {}".format(e), telegram_digest=("api_err", str(e)[:220]))
                 if job.stop_event.wait(wait_s):
@@ -521,7 +525,7 @@ def _run_reserve_job(job, manager, bot, loop):
         _send_telegram_text(bot, loop, job.chat_id, line)
 
     set_log_callback(_tg)
-    park = bcparks_fetch_park_name(job.args.url)
+    park = fetch_park_name(job.args.url)
     set_telegram_job_meta(job.job_id, job.args.interval, park_name=park,
                           interval_jitter_seconds=getattr(job.args, "jitter", 0))
     args = job.args
@@ -620,7 +624,8 @@ def telegram_help_text():
         "/status <job_id>\n"
         "/cancel <job_id>\n"
         "/help\n\n"
-        "Tip: tap 📡 Monitor or send a plain booking URL for defaults."
+        "Tip: tap 📡 Monitor or send a plain booking URL for defaults.\n"
+        "Works with BC Parks, Ontario Parks, Parks Canada, and other Aspira platforms."
     )
 
 
@@ -779,7 +784,7 @@ def run_telegram_bot(args):
             context.user_data.pop(UD_MONITOR, None)
             context.user_data[UD_PENDING] = "r_url"
             await _tg_reply(update,
-                            "Send your full BC Parks results URL, or type a full /monitor … command.\n\n{}".format(
+                            "Send your park booking results URL, or type a full /monitor … command.\n\n{}".format(
                                 telegram_help_text()), reply_markup=_main_menu_keyboard())
             return
         await _start_job(update, context, raw)
@@ -875,10 +880,10 @@ def run_telegram_bot(args):
                 await _tg_reply(update, "Okay, cancelled.")
                 return
             if not (txt.startswith("http://") or txt.startswith("https://")):
-                await _tg_reply(update, "Please send a URL starting with https://camping.bcparks.ca/... or type abort.")
+                await _tg_reply(update, "Please send a park booking URL (e.g. https://camping.bcparks.ca/create-booking/...) or type abort.")
                 return
             try:
-                validate_bcparks_booking_url(txt)
+                validate_booking_url(txt)
             except ValueError as e:
                 await _tg_reply(update, "Invalid URL: {}".format(e))
                 return
@@ -1002,7 +1007,8 @@ def run_telegram_bot(args):
             context.user_data.pop(UD_MONITOR, None)
             context.user_data[UD_PENDING] = "r_url"
             await q.message.reply_text(
-                "Send your full BC Parks results URL (https://camping.bcparks.ca/create-booking/...).\n"
+                "Send your full park booking results URL (e.g. https://camping.bcparks.ca/create-booking/...).\n"
+                "Works with BC Parks, Ontario Parks, Parks Canada, and other supported platforms.\n"
                 "You can still type a full /monitor … command manually anytime.")
             return
         if data.startswith("j:c:"):

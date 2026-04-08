@@ -17,7 +17,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-from campslinger.core import BCPARKS_HEADERS
+from campslinger.core import API_HEADERS
 from campslinger.log import pp
 from campslinger.util import debug_screenshot, sort_key
 
@@ -31,7 +31,7 @@ def setup_webdriver(headed=False):
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--log-level=3")
     options.add_argument("--window-size=1920,1400")
-    options.add_argument("--user-agent={}".format(BCPARKS_HEADERS["User-Agent"]))
+    options.add_argument("--user-agent={}".format(API_HEADERS["User-Agent"]))
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)

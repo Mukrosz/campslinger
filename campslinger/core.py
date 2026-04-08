@@ -1,13 +1,12 @@
-"""BC Parks API layer: site availability, park name, URL parsing."""
+"""Park platform API layer: site availability, park name, URL parsing."""
 
 from urllib.parse import urlencode
 
 import requests
 
-from campslinger.util import sort_key, validate_bcparks_booking_url
+from campslinger.util import api_base_from_url, sort_key, validate_booking_url
 
-BCPARKS_API_BASE = "https://camping.bcparks.ca/api/"
-BCPARKS_HEADERS = {
+API_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -15,7 +14,7 @@ BCPARKS_HEADERS = {
 }
 
 
-def bcparks_parse_url(url, params):
+def parse_booking_url(url, params):
     from urllib.parse import parse_qs, urlparse
     try:
         url_params = parse_qs(urlparse(url).query)
@@ -28,7 +27,7 @@ def bcparks_parse_url(url, params):
     return url_params
 
 
-def bcparks_normalize_sites(n_dict, a_dict):
+def normalize_sites(n_dict, a_dict):
     merged = {}
     for key in a_dict.get("resourceAvailabilities", {}):
         name = n_dict[key].get("localizedValues", {})[0].get("name", "")
@@ -42,27 +41,29 @@ def bcparks_normalize_sites(n_dict, a_dict):
     return {k: merged[k] for k in sorted(merged, key=sort_key)}
 
 
-def bcparks_fetch_sites_map(booking_url):
-    validate_bcparks_booking_url(booking_url)
-    site_name_params = bcparks_parse_url(booking_url, ["resourceLocationId", "mapId"])
-    site_status_params = bcparks_parse_url(booking_url, ["mapId", "startDate", "endDate"])
-    names_url = "{}resourcelocation/resources?{}".format(BCPARKS_API_BASE, urlencode(site_name_params))
-    status_url = "{}availability/map?{}".format(BCPARKS_API_BASE, urlencode(site_status_params))
-    r1 = requests.get(names_url, headers=BCPARKS_HEADERS, timeout=30)
+def fetch_sites_map(booking_url):
+    validate_booking_url(booking_url)
+    api_base = api_base_from_url(booking_url)
+    site_name_params = parse_booking_url(booking_url, ["resourceLocationId", "mapId"])
+    site_status_params = parse_booking_url(booking_url, ["mapId", "startDate", "endDate"])
+    names_url = "{}resourcelocation/resources?{}".format(api_base, urlencode(site_name_params))
+    status_url = "{}availability/map?{}".format(api_base, urlencode(site_status_params))
+    r1 = requests.get(names_url, headers=API_HEADERS, timeout=30)
     r1.raise_for_status()
-    r2 = requests.get(status_url, headers=BCPARKS_HEADERS, timeout=30)
+    r2 = requests.get(status_url, headers=API_HEADERS, timeout=30)
     r2.raise_for_status()
-    return bcparks_normalize_sites(r1.json(), r2.json())
+    return normalize_sites(r1.json(), r2.json())
 
 
-def bcparks_fetch_park_name(booking_url):
+def fetch_park_name(booking_url):
     try:
-        validate_bcparks_booking_url(booking_url)
-        p = bcparks_parse_url(booking_url, ["resourceLocationId"])
+        validate_booking_url(booking_url)
+        api_base = api_base_from_url(booking_url)
+        p = parse_booking_url(booking_url, ["resourceLocationId"])
         rid_str = p["resourceLocationId"]
         rid_int = int(rid_str)
-        loc_url = "{}resourcelocation?resourceLocationId={}".format(BCPARKS_API_BASE, rid_str)
-        r = requests.get(loc_url, headers=BCPARKS_HEADERS, timeout=30)
+        loc_url = "{}resourcelocation?resourceLocationId={}".format(api_base, rid_str)
+        r = requests.get(loc_url, headers=API_HEADERS, timeout=30)
         r.raise_for_status()
         data = r.json()
         if not isinstance(data, list):

@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """
-campslinger.py -- BC Parks monitoring and optional reservation (CLI).
+campslinger.py -- campsite monitoring and optional reservation (CLI).
+
+Supports parks on the Aspira / GoingToCamp platform (BC Parks, Ontario Parks,
+Parks Canada, Manitoba, Nova Scotia, New Brunswick, NL, Yukon, Michigan,
+Maryland, Mississippi, Nebraska, and more).
 
 Default: API-only monitoring with terminal output and optional SMS.
 With --reserve: also drives Chrome to click Reserve when a site is available.
@@ -20,8 +24,8 @@ import time
 
 from campslinger.core import (
     api_available_labels,
-    bcparks_fetch_park_name,
-    bcparks_fetch_sites_map,
+    fetch_park_name,
+    fetch_sites_map,
     labels_available_matching_filter,
 )
 from campslinger.log import pp, set_park_name
@@ -34,7 +38,7 @@ from campslinger.util import (
     send_sms,
     shorten_url,
     sort_key,
-    validate_bcparks_booking_url,
+    validate_booking_url,
 )
 
 
@@ -44,12 +48,15 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawTextHel
 
 def build_arg_parser():
     description = (
-        "BC Parks monitoring and optional reservation.\n\n"
+        "Campsite monitoring and optional reservation.\n"
+        "Works with any park on the Aspira / GoingToCamp platform\n"
+        "(BC Parks, Ontario Parks, Parks Canada, and many more).\n\n"
         "Default: API-only monitoring (no Chrome).\n"
         "With --reserve: Selenium clicks Reserve on hit.\n\n"
         "Examples:\n"
         "  Monitor any availability:\n"
-        "    ./campslinger.py --url 'https://camping.bcparks.ca/create-booking/...'\n\n"
+        "    ./campslinger.py --url 'https://camping.bcparks.ca/create-booking/...'\n"
+        "    ./campslinger.py --url 'https://reservations.ontarioparks.ca/create-booking/...'\n\n"
         "  Monitor specific sites:\n"
         "    ./campslinger.py --url '...' --f S51,S52 --i 30\n\n"
         "  Stop after first hit:\n"
@@ -65,7 +72,7 @@ def build_arg_parser():
     )
     p = argparse.ArgumentParser(description=description, formatter_class=_HelpFormatter)
     p.add_argument("--url", "--u", dest="url", required=True, metavar="URL",
-                    help="Full BC Parks create-booking results URL.")
+                    help="Full park create-booking results URL (any supported platform).")
     p.add_argument("--interval", "--i", type=int, default=60, metavar="SECONDS",
                     help="Seconds between API polls (ignored in warmode).")
     p.add_argument("--jitter", "--ij", type=int, default=10, metavar="SECONDS",
@@ -102,7 +109,7 @@ def build_arg_parser():
 
 
 def _validate_args(args):
-    validate_bcparks_booking_url(args.url)
+    validate_booking_url(args.url)
     if args.warmode and not args.reserve:
         sys.exit("Error: --warmode requires --reserve")
     if args.headed and not args.reserve:
@@ -130,7 +137,7 @@ def _monitor_loop(args, client):
     while True:
         wait_s = randomized_probe_wait_seconds(args.interval, args.jitter)
         try:
-            sites = bcparks_fetch_sites_map(args.url)
+            sites = fetch_sites_map(args.url)
         except Exception as e:
             pp("❌ API poll failed: {}".format(e))
             time.sleep(wait_s)
@@ -169,7 +176,7 @@ def main():
     args = build_arg_parser().parse_args()
     _validate_args(args)
 
-    park = bcparks_fetch_park_name(args.url)
+    park = fetch_park_name(args.url)
     set_park_name(park)
     client = _setup_twilio(args)
 

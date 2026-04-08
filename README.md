@@ -1,6 +1,8 @@
 # 🏕️ campslinger
 
-**BC Parks campsite monitoring and reservation helpers for Linux.**
+**Campsite monitoring and reservation helpers for Linux.**
+
+Works with any park on the **Aspira / GoingToCamp** booking platform -- BC Parks, Ontario Parks, Parks Canada, and many more across Canada and the USA.
 
 Watch availability via the public API, get notified when sites open up, and optionally automate the Reserve click with Selenium -- from the terminal or a Telegram bot.
 
@@ -12,13 +14,37 @@ Watch availability via the public API, get notified when sites open up, and opti
 
 | Section | What you get |
 |---------|--------------|
+| [Supported parks](#-supported-parks) | Platforms and hostnames that work out of the box. |
 | [Quick start](#-quick-start) | Clone, install, and run your first monitor in 60 seconds. |
-| [campslinger.py](#-campslingerpy--cli) | Unified CLI: monitor-first with optional `--reserve` (replaces the old `monitor.py` + `reserve.py`). |
+| [campslinger.py](#-campslingerpy--cli) | Unified CLI: monitor-first with optional `--reserve`. |
 | [campslinger_tg.py](#-campslinger_tgpy--telegram-bot) | Telegram bot with the same feature set, controlled from your phone. |
 | [Chrome setup](#-chrome-setup) | Install Chrome, ChromeDriver, remote debugging -- needed only when `--reserve` is used. |
 | [Hold vs finishing your booking](#-hold-vs-finishing-your-booking) | What a successful Reserve click actually does (cart hold, not full checkout). |
 | [Archive](#-archive) | Legacy scripts kept for reference. |
-| [Policies & disclaimer](#-policies--disclaimer) | Fair use, rate limits, and "not affiliated with BC Parks." |
+| [Policies & disclaimer](#-policies--disclaimer) | Fair use, rate limits, and disclaimer. |
+
+---
+
+## 🌍 Supported parks
+
+All parks using the **Aspira / GoingToCamp** reservation platform share the same API and booking UI. Only the hostname differs.
+
+| Park system | Hostname |
+|---|---|
+| **BC Parks** (Canada) | `camping.bcparks.ca` |
+| **Ontario Parks** (Canada) | `reservations.ontarioparks.ca` |
+| **Parks Canada** | `reservation.pc.gc.ca` |
+| **Manitoba Parks** (Canada) | `camping.manitobaparks.com` |
+| **Nova Scotia Parks** (Canada) | `camping.novascotia.ca` |
+| **New Brunswick Parks** (Canada) | `camping.nbbparks.ca` |
+| **Newfoundland & Labrador** (Canada) | `camping.nlcamping.ca` |
+| **Yukon Parks** (Canada) | `yukon.goingtocamp.com` |
+| **Michigan** (USA) | `midnrreservations.com` |
+| **Maryland** (USA) | `parkreservations.maryland.gov` |
+| **Mississippi** (USA) | `mississippi.goingtocamp.com` |
+| **Nebraska** (USA) | `nebraska.goingtocamp.com` |
+
+> Missing a park? If it uses the same `/create-booking/` URL pattern and API, adding the hostname to the allowlist is a one-line change in `campslinger/util.py`.
 
 ---
 
@@ -35,10 +61,14 @@ pip install -r requirements.txt
 Monitor any availability (no Chrome needed):
 
 ```bash
+# BC Parks
 python3 campslinger.py --url 'https://camping.bcparks.ca/create-booking/results?...'
+
+# Ontario Parks
+python3 campslinger.py --url 'https://reservations.ontarioparks.ca/create-booking/results?...'
 ```
 
-That's it. Sites matching your URL will be printed as they appear. Add `--f S51,S52` to filter, `--i 30` to poll every 30s.
+Sites matching your URL will be printed as they appear. Add `--f S51,S52` to filter, `--i 30` to poll every 30s.
 
 ---
 
@@ -48,7 +78,7 @@ That's it. Sites matching your URL will be printed as they appear. Add `--f S51,
 
 | Mode | Behaviour |
 |------|-----------|
-| **Monitor** (default) | Polls the BC Parks API for availability. Prints matching sites to the terminal. No browser. |
+| **Monitor** (default) | Polls the park API for availability. Prints matching sites to the terminal. No browser. |
 | **Reserve** (`--reserve`) | Same API polling, but when a target site is free, opens Chrome, finds the site on the map, and clicks **Reserve**. |
 | **Warmode** (`--reserve --warmode`) | No API polling. Prefetches the map at 06:59 US/Pacific, clicks Reserve at 07:00. |
 
@@ -84,7 +114,7 @@ python3 campslinger.py --url '...' --sms --tsid X --tat X --tn X --mpn X
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--url` / `--u` | *(required)* | Full BC Parks create-booking results URL. |
+| `--url` / `--u` | *(required)* | Full park create-booking results URL (any supported platform). |
 | `--interval` / `--i` | `60` | Seconds between API polls (ignored in warmode). |
 | `--jitter` / `--ij` | `10` | Random variance around `--interval` (e.g. 50–70s). |
 | `--filter` / `--f` | *(all sites)* | Comma-separated preferred site labels. Order = priority. |
@@ -101,16 +131,17 @@ python3 campslinger.py --url '...' --sms --tsid X --tat X --tn X --mpn X
 
 ### Booking URL
 
-1. Open **[Create booking](https://camping.bcparks.ca/create-booking/)**, choose park, dates, equipment, search.
-2. On the **map / results** page, copy the **full** URL from the address bar.
+1. Go to your park's reservation site (e.g. [BC Parks](https://camping.bcparks.ca/create-booking/), [Ontario Parks](https://reservations.ontarioparks.ca/create-booking/)).
+2. Choose park, dates, equipment, and search.
+3. On the **map / results** page, copy the **full** URL from the address bar.
 
-The URL must be `https://` on `camping.bcparks.ca` under `/create-booking/`.
+The URL must be `https://` on a [supported park host](#-supported-parks) under `/create-booking/`.
 
 ---
 
 ## 📱 campslinger_tg.py — Telegram bot
 
-Same features as the CLI, but controlled from Telegram. Monitor is the primary action; Reserve is an optional toggle in the wizard.
+Same features as the CLI, but controlled from Telegram. Monitor is the primary action; Reserve is an optional toggle in the wizard. Works with all supported park platforms.
 
 ### Feature matrix
 
@@ -223,7 +254,7 @@ On the machine with the screen:
 
 ```bash
 google-chrome \
-  --user-data-dir="$HOME/.bcparks-profile" \
+  --user-data-dir="$HOME/.campslinger-profile" \
   --remote-debugging-port=9222 \
   --no-first-run --no-default-browser-check
 ```
@@ -258,7 +289,7 @@ This applies when **Reserve** is toggled on (not for monitor-only jobs).
 
 **Headless Chrome on the server** — clicking Reserve typically places the site in a **cart / hold** for ~10–15 minutes, not a complete booking. That hold is in an anonymous server-side session you cannot access from your own browser. The site appears unavailable to everyone during the hold.
 
-**Strategy:** be ready on the real BC Parks site, signed in, so when the hold expires and the site re-appears, you complete a normal booking before other visitors notice.
+**Strategy:** be ready on the park's reservation site, signed in, so when the hold expires and the site re-appears, you complete a normal booking before other visitors notice.
 
 **Remote Chrome (`--rip`/`--rp`)** — the script drives *your* browser (your profile, your login), so the hold is in a session you can continue into checkout.
 
@@ -282,5 +313,5 @@ These will be removed once the new scripts are fully validated.
 
 - A successful Reserve click creates a **time-limited hold**, not a completed booking. Finish checkout before it expires.
 - Poll at reasonable intervals; aggressive polling can get an IP blocked.
-- BC Parks may change the site at any time.
-- **Not affiliated with BC Parks.** Use at your own risk.
+- Park platforms may change at any time.
+- **Not affiliated with any park authority or Aspira.** Use at your own risk.
