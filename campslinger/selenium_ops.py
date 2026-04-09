@@ -17,9 +17,14 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
-from campslinger.core import API_HEADERS
+from campslinger.core import API_HEADERS, fetch_park_name
 from campslinger.log import pp
-from campslinger.util import debug_screenshot, sort_key
+from campslinger.util import (
+    build_debug_artifact_basename,
+    build_debug_screenshot_path,
+    debug_screenshot,
+    sort_key,
+)
 
 
 def setup_webdriver(headed=False):
@@ -70,7 +75,7 @@ def setup_webdriver_remote(ip, port):
         return None
 
 
-def _dump_map_load_failure(driver, debug):
+def _dump_map_load_failure(driver, debug, booking_url=None, park_name=None):
     try:
         pp("   Diagnostic: title={!r}".format(driver.title))
         pp("   Current URL: {}".format(driver.current_url))
@@ -80,10 +85,18 @@ def _dump_map_load_failure(driver, debug):
     except Exception as e:
         pp("   Could not inspect page: {}".format(e))
     if not debug:
-        pp("   Re-run with --debug to save reserve_map_failure.html and reserve_map_failure.png here.")
+        pp("   Re-run with --debug to save descriptive map-failure .html and .png in cwd.")
         return
-    html_path = os.path.join(os.getcwd(), "reserve_map_failure.html")
-    png_path = os.path.join(os.getcwd(), "reserve_map_failure.png")
+    cwd = os.getcwd()
+    pname = park_name
+    if pname is None and booking_url:
+        try:
+            pname = fetch_park_name(booking_url)
+        except Exception:
+            pname = None
+    stem = build_debug_artifact_basename(booking_url or "", pname, "mapfail")
+    html_path = os.path.join(cwd, stem + ".html")
+    png_path = os.path.join(cwd, stem + ".png")
     try:
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(driver.page_source)
@@ -93,7 +106,9 @@ def _dump_map_load_failure(driver, debug):
     debug_screenshot(driver, png_path, message="Map load failure screenshot")
 
 
-def get_available_sites(driver, url, max_attempts=5, retry_delay=1, debug=False, stop_event=None):
+def get_available_sites(
+    driver, url, max_attempts=5, retry_delay=1, debug=False, stop_event=None, park_name=None
+):
     """Selenium: map icons with class icon-available -> {label_lower: icon_element}."""
     for attempt in range(max_attempts):
         if stop_event and stop_event.is_set():
@@ -152,7 +167,7 @@ def get_available_sites(driver, url, max_attempts=5, retry_delay=1, debug=False,
             return available
         except TimeoutException:
             pp("❌ Timeout waiting for map or map icons")
-            _dump_map_load_failure(driver, debug)
+            _dump_map_load_failure(driver, debug, booking_url=url, park_name=park_name)
         except WebDriverException as e:
             pp("❌ WebDriver error: {}".format(e))
             break
@@ -163,11 +178,22 @@ def get_available_sites(driver, url, max_attempts=5, retry_delay=1, debug=False,
     return {}
 
 
-def collect_available_icons_from_map(driver, url, debug=False, stop_event=None):
-    return get_available_sites(driver, url, max_attempts=3, retry_delay=1, debug=debug, stop_event=stop_event)
+def collect_available_icons_from_map(driver, url, debug=False, stop_event=None, park_name=None):
+    return get_available_sites(
+        driver, url, max_attempts=3, retry_delay=1,
+        debug=debug, stop_event=stop_event, park_name=park_name,
+    )
 
 
-def prepare_reservation(driver, available_sites, requested_sites, debug=False):
+def prepare_reservation(
+    driver,
+    available_sites,
+    requested_sites,
+    debug=False,
+    booking_url=None,
+    park_name=None,
+    file_timestamp=None,
+):
     available_site_names = list(available_sites.keys())
     requested_sites = requested_sites if requested_sites else available_site_names
     for site in requested_sites:
@@ -184,7 +210,11 @@ def prepare_reservation(driver, available_sites, requested_sites, debug=False):
                 if reserve_buttons:
                     reserve_button = reserve_buttons[-1]
                     if debug:
-                        debug_screenshot(driver, os.path.join(os.getcwd(), "ss-after_clicking_site.png"))
+                        path = build_debug_screenshot_path(
+                            booking_url or "", park_name, "acs",
+                            file_timestamp=file_timestamp,
+                        )
+                        debug_screenshot(driver, path, message="After clicking site")
                     return site, reserve_button
             except Exception as e:
                 pp("⚠️  Skipped site {} due to: {}".format(site, e))

@@ -1,10 +1,11 @@
 """Pure-Python utilities shared by CLI and Telegram entrypoints."""
 
+import os
 import random
 import re
 import sys
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 SUPPORTED_PARK_HOSTS = (
     "camping.bcparks.ca",
@@ -51,6 +52,61 @@ def api_base_from_url(booking_url):
     """Derive the API base (e.g. https://host/api/) from a booking URL."""
     p = urlparse(booking_url.strip())
     return "https://{}/api/".format(p.hostname.lower())
+
+
+def _slugify_park_label(name):
+    """Lowercase filesystem-friendly slug from park display name."""
+    s = (name or "").strip().lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s)
+    s = re.sub(r"-+", "-", s).strip("-")
+    if not s:
+        return "unknown-park"
+    if len(s) > 72:
+        s = s[:72].rstrip("-")
+    return s
+
+
+def _stay_window_slug(booking_url):
+    """e.g. jun09-jun12 from startDate/endDate query params."""
+    try:
+        q = parse_qs(urlparse((booking_url or "").strip()).query)
+        sd = (q.get("startDate") or [None])[0]
+        ed = (q.get("endDate") or [None])[0]
+        if not sd or not ed:
+            return "nostay"
+        d1 = datetime.strptime(sd[:10], "%Y-%m-%d")
+        d2 = datetime.strptime(ed[:10], "%Y-%m-%d")
+        return "{}-{}".format(d1.strftime("%b%d").lower(), d2.strftime("%b%d").lower())
+    except (ValueError, TypeError):
+        return "nostay"
+
+
+def build_debug_screenshot_path(
+    booking_url, park_name, short_tag, directory=None, file_timestamp=None
+):
+    """
+    Build a descriptive debug PNG path, e.g.
+    ss_2026.04.08-22.03.11_kikomun-creek_jun09-jul14_bcr.png
+
+    short_tag: bcr (before click reserve), acr (after), acs (after click site), mapfail.
+    Pass the same file_timestamp for acs/bcr/acr in one attempt so names correlate.
+    """
+    directory = directory or os.getcwd()
+    ts = file_timestamp or datetime.now().strftime("%Y.%m.%d-%H.%M.%S")
+    slug = _slugify_park_label(park_name)
+    stay = _stay_window_slug(booking_url)
+    tag = re.sub(r"[^a-z0-9]", "", (short_tag or "ss").lower())[:16] or "ss"
+    base = "ss_{}_{}_{}_{}".format(ts, slug, stay, tag)
+    return os.path.join(directory, base + ".png")
+
+
+def build_debug_artifact_basename(booking_url, park_name, short_tag, file_timestamp=None):
+    """Stem (no extension) for paired .html / .png map-failure dumps."""
+    ts = file_timestamp or datetime.now().strftime("%Y.%m.%d-%H.%M.%S")
+    slug = _slugify_park_label(park_name)
+    stay = _stay_window_slug(booking_url)
+    tag = re.sub(r"[^a-z0-9]", "", (short_tag or "ss").lower())[:16] or "ss"
+    return "ss_{}_{}_{}_{}".format(ts, slug, stay, tag)
 
 
 def sort_key(s):

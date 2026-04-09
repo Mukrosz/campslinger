@@ -86,7 +86,7 @@ def build_arg_parser():
     p.add_argument("--warmode", "--w", action="store_true", default=False,
                     help="Warmode: prefetch at 06:59, click Reserve at 07:00 US/Pacific. Requires --reserve.")
     p.add_argument("--debug", "--d", action="store_true", default=False,
-                    help="Extra diagnostics and screenshots on map failures.")
+                    help="Extra diagnostics; screenshots named ss_<time>_<park>_<stay>_bcr|acr|acs|mapfail.png.")
     p.add_argument("--headed", action="store_true", default=False,
                     help="Show Chrome window (requires --reserve).")
     p.add_argument("--timezone", default="US/Pacific", metavar="TZ",

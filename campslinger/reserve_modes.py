@@ -1,12 +1,12 @@
 """Reservation loop strategies: normal polling and warmode (timed 07:00 click)."""
 
-import os
 import sys
 import time
 from datetime import datetime
 
 from campslinger.core import (
     api_available_labels,
+    fetch_park_name,
     fetch_sites_map,
     pick_api_target,
 )
@@ -16,6 +16,7 @@ from campslinger.selenium_ops import (
     prepare_reservation,
 )
 from campslinger.util import (
+    build_debug_screenshot_path,
     debug_screenshot,
     randomized_probe_wait_seconds,
     sort_key,
@@ -23,6 +24,7 @@ from campslinger.util import (
 
 
 def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=10, debug=False, stop_event=None):
+    debug_park = fetch_park_name(url) if debug else None
     while True:
         wait_s = randomized_probe_wait_seconds(interval, interval_jitter)
         if stop_event and stop_event.is_set():
@@ -63,7 +65,9 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
         pp("✨ Available sites: {}".format(",".join(sorted(avail, key=sort_key))), skip_telegram=True)
         label = sites[target].get("label", target)
         pp("🎯 Trying map + Reserve for: {} …".format(label))
-        on_map = collect_available_icons_from_map(driver, url, debug=debug, stop_event=stop_event)
+        file_ts = datetime.now().strftime("%Y.%m.%d-%H.%M.%S") if debug else None
+        on_map = collect_available_icons_from_map(
+            driver, url, debug=debug, stop_event=stop_event, park_name=debug_park)
         if target not in on_map:
             pp("⚠️  API shows {} but map has no matching available icon yet; waiting {}s…".format(
                 label, wait_s), telegram_digest=("map_wait", label))
@@ -72,17 +76,30 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
                 return ""
             time.sleep(0 if stop_event else wait_s)
             continue
-        site, reserve_button = prepare_reservation(driver, on_map, [target], debug=debug)
+        site, reserve_button = prepare_reservation(
+            driver, on_map, [target], debug=debug, booking_url=url,
+            park_name=debug_park, file_timestamp=file_ts,
+        )
         if site and reserve_button:
             try:
                 driver.execute_script("arguments[0].scrollIntoView(true);", reserve_button)
                 if debug:
-                    debug_screenshot(driver, os.path.join(os.getcwd(), "ss-before_clicking_reserve.png"))
+                    debug_screenshot(
+                        driver,
+                        build_debug_screenshot_path(
+                            url, debug_park, "bcr", file_timestamp=file_ts),
+                        message="Before clicking reserve",
+                    )
                 driver.execute_script("arguments[0].click();", reserve_button)
                 pp("✅ Clicked the Reserve button")
                 time.sleep(5)
                 if debug:
-                    debug_screenshot(driver, os.path.join(os.getcwd(), "ss-after_clicking_reserve.png"))
+                    debug_screenshot(
+                        driver,
+                        build_debug_screenshot_path(
+                            url, debug_park, "acr", file_timestamp=file_ts),
+                        message="After clicking reserve",
+                    )
                 return site
             except Exception as e:
                 pp("❌ Failed to click reserve button: {}".format(e))
@@ -129,11 +146,17 @@ def reserve_war_mode(driver, url, requested_sites, timezone="US/Pacific", debug=
     if not wait_until(target_time - timedelta(minutes=1)):
         pp("🛑 Cancellation requested")
         return ""
-    available_sites = get_available_sites(driver, url, debug=debug, stop_event=stop_event)
+    debug_park = fetch_park_name(url) if debug else None
+    file_ts = datetime.now().strftime("%Y.%m.%d-%H.%M.%S") if debug else None
+    available_sites = get_available_sites(
+        driver, url, debug=debug, stop_event=stop_event, park_name=debug_park)
     if not available_sites:
         pp("❌ No available sites on map at prefetch time")
         return ""
-    site, reserve_button = prepare_reservation(driver, available_sites, requested_sites, debug=debug)
+    site, reserve_button = prepare_reservation(
+        driver, available_sites, requested_sites, debug=debug,
+        booking_url=url, park_name=debug_park, file_timestamp=file_ts,
+    )
     if not site or not reserve_button:
         pp("❌ Could not prepare reservation (prefetch)")
         return ""
@@ -144,12 +167,22 @@ def reserve_war_mode(driver, url, requested_sites, timezone="US/Pacific", debug=
     try:
         driver.execute_script("arguments[0].scrollIntoView(true);", reserve_button)
         if debug:
-            debug_screenshot(driver, os.path.join(os.getcwd(), "ss-before_clicking_reserve.png"))
+            debug_screenshot(
+                driver,
+                build_debug_screenshot_path(
+                    url, debug_park, "bcr", file_timestamp=file_ts),
+                message="Before clicking reserve",
+            )
         driver.execute_script("arguments[0].click();", reserve_button)
         pp("✅ Clicked the Reserve button")
         time.sleep(5)
         if debug:
-            debug_screenshot(driver, os.path.join(os.getcwd(), "ss-after_clicking_reserve.png"))
+            debug_screenshot(
+                driver,
+                build_debug_screenshot_path(
+                    url, debug_park, "acr", file_timestamp=file_ts),
+                message="After clicking reserve",
+            )
         return site
     except Exception as e:
         pp("❌ Failed to click reserve button at {}: {}".format(fmt_ampm(target_time), e))

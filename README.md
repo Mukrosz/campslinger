@@ -121,7 +121,7 @@ python3 campslinger.py --url '...' --sms --tsid X --tat X --tn X --mpn X
 | `--reserve` / `--r` | off | Enable Selenium reservation on hit. |
 | `--loop` | `continuous` | `continuous` or `once` (stop after first hit). |
 | `--warmode` / `--w` | off | 07:00 US/Pacific timed reserve. Requires `--reserve`. |
-| `--debug` / `--d` | off | Extra diagnostics, screenshots on map failures. |
+| `--debug` / `--d` | off | Extra diagnostics; saves descriptive screenshots (`ss_<timestamp>_<park-slug>_<stay>_bcr|acr|acs|mapfail.png`) and map-failure HTML. |
 | `--headed` | off | Show Chrome window. Requires `--reserve`. |
 | `--timezone` | `US/Pacific` | IANA timezone for warmode. |
 | `--rip` / `--remote_ip` | — | Chrome remote debugging host. Requires `--reserve` + `--rp`. |
@@ -276,7 +276,7 @@ Do **not** expose the debug port to the public internet.
 
 ### Map troubleshooting
 
-1. Add `--debug` (saves HTML + PNG on failure).
+1. Add `--debug` (saves paired HTML + PNG on map load failure, with timestamp / park / stay-dates in the filename).
 2. Try `--headed` on a machine with a display.
 3. Try remote Chrome with `--rip`/`--rp`.
 4. Ensure Chrome and ChromeDriver major versions match.
