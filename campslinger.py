@@ -64,7 +64,9 @@ def build_arg_parser():
         "  Reserve on hit (Selenium):\n"
         "    ./campslinger.py --url '...' --f S51 --reserve\n\n"
         "  Warmode reserve (07:00 US/Pacific):\n"
-        "    ./campslinger.py --url '...' --f S51 --reserve --warmode\n\n"
+        "    ./campslinger.py --url '...' --f S51 --reserve --warmode\n"
+        "  Warmode + 300 ms delay after open time before Reserve click:\n"
+        "    ./campslinger.py --url '...' --f S51 --reserve --warmode --wcd 300\n\n"
         "  Reserve with remote Chrome:\n"
         "    ./campslinger.py --url '...' --reserve --rip 192.168.1.50 --rp 9222\n\n"
         "  SMS on availability (monitor or reserve):\n"
@@ -85,6 +87,11 @@ def build_arg_parser():
                     help="continuous: keep polling. once: stop after first hit.")
     p.add_argument("--warmode", "--w", action="store_true", default=False,
                     help="Warmode: prefetch at 06:59, click Reserve at 07:00 US/Pacific. Requires --reserve.")
+    p.add_argument(
+        "--warmode-click-delay", "--wcd", type=int, default=0, metavar="MS",
+        help="Milliseconds to wait after warmode open time before clicking Reserve (0=immediate). "
+             "Only applies with --warmode.",
+    )
     p.add_argument("--debug", "--d", action="store_true", default=False,
                     help="Extra diagnostics; screenshots named ss_<time>_<park>_<stay>_bcr|acr|acs|mapfail.png.")
     p.add_argument("--headed", action="store_true", default=False,
@@ -120,6 +127,11 @@ def _validate_args(args):
         sys.exit("Error: --rip and --rp must be used together")
     if rip and not args.reserve:
         sys.exit("Error: --rip/--rp require --reserve")
+    wcd = int(getattr(args, "warmode_click_delay", 0) or 0)
+    if wcd < 0:
+        sys.exit("Error: --warmode-click-delay must be >= 0")
+    if wcd and not args.warmode:
+        sys.exit("Error: --warmode-click-delay is only valid with --warmode")
 
 
 def _setup_twilio(args):
@@ -201,7 +213,9 @@ def main():
         if args.warmode:
             reserved = reserve_war_mode(
                 driver, args.url, args.filter,
-                timezone=args.timezone, debug=args.debug)
+                timezone=args.timezone, debug=args.debug,
+                warmode_click_delay_ms=int(args.warmode_click_delay or 0),
+            )
         else:
             reserved = reserve_normal_mode(
                 driver, args.url, args.filter,

@@ -80,7 +80,7 @@ Sites matching your URL will be printed as they appear. Add `--f S51,S52` to fil
 |------|-----------|
 | **Monitor** (default) | Polls the park API for availability. Prints matching sites to the terminal. No browser. |
 | **Reserve** (`--reserve`) | Same API polling, but when a target site is free, opens Chrome, finds the site on the map, and clicks **Reserve**. |
-| **Warmode** (`--reserve --warmode`) | No API polling. Prefetches the map at 06:59 US/Pacific, clicks Reserve at 07:00. |
+| **Warmode** (`--reserve --warmode`) | No API polling. Prefetches the map at 06:59 US/Pacific, clicks Reserve at 07:00. Optional `--warmode-click-delay` waits extra milliseconds after open time (helps server-side “not yet allowed” races). |
 
 ### Usage examples
 
@@ -99,6 +99,9 @@ python3 campslinger.py --url '...' --f S51 --reserve
 
 # Warmode reserve (07:00 US/Pacific)
 python3 campslinger.py --url '...' --f S51 --reserve --warmode
+
+# Warmode with 400 ms delay after 07:00 before clicking Reserve
+python3 campslinger.py --url '...' --f S51 --reserve --warmode --warmode-click-delay 400
 
 # Visible Chrome window (debugging)
 python3 campslinger.py --url '...' --reserve --headed
@@ -121,6 +124,7 @@ python3 campslinger.py --url '...' --sms --tsid X --tat X --tn X --mpn X
 | `--reserve` / `--r` | off | Enable Selenium reservation on hit. |
 | `--loop` | `continuous` | `continuous` or `once` (stop after first hit). |
 | `--warmode` / `--w` | off | 07:00 US/Pacific timed reserve. Requires `--reserve`. |
+| `--warmode-click-delay` / `--wcd` | `0` | Milliseconds to wait **after** warmode open time before clicking Reserve. **Only with `--warmode`.** `0` = click immediately when the clock hits 07:00. |
 | `--debug` / `--d` | off | Extra diagnostics; saves descriptive screenshots (`ss_<timestamp>_<park-slug>_<stay>_bcr|acr|acs|mapfail.png`) and map-failure HTML. |
 | `--headed` | off | Show Chrome window. Requires `--reserve`. |
 | `--timezone` | `US/Pacific` | IANA timezone for warmode. |
@@ -151,7 +155,8 @@ Same features as the CLI, but controlled from Telegram. Monitor is the primary a
 | ⛺ **Reserve** | Off | Toggle in wizard More menu, or `--reserve` |
 | 🔄 **Loop** | Continuous | Set in More menu, or `--loop once` |
 | 📱 **SMS / Twilio** | Off | Configure in SMS submenu under More |
-| 🌅 **Warmode** | Off | Shown when Reserve is on |
+| 🌅 **Warmode** | Off | Shown when Reserve is on (row below Reserve) |
+| ⏱ **WM delay** | `0` ms | Shown to the right of Warmode when Warmode is on; tap to set milliseconds (same as `--warmode-click-delay`) |
 | 🐛 **Debug** | Off | Shown when Reserve is on |
 
 ### Server operator setup
@@ -204,7 +209,7 @@ Restart=on-failure
 ### Telegram user guide
 
 - **`/help`** — commands + quick-action buttons.
-- **📡 Monitor** — wizard: paste URL → **Go** (defaults) or **More** (sites, interval, jitter, reserve, loop, SMS, warmode, debug).
+- **📡 Monitor** — wizard: paste URL → **Go** (defaults) or **More** (sites, interval, jitter, reserve, then warmode / WM delay / debug, loop, SMS).
 - **`/jobs`**, **`/status <id>`**, **`/cancel <id>`** — job management. Each user only sees their own jobs.
 - **Plain URL message** — starts a default monitor job (no Reserve).
 - Type `/monitor <url> --f S51 --reserve --loop once` for a one-liner.

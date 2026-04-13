@@ -220,6 +220,7 @@ def build_bot_monitor_parser():
     parser.add_argument("--reserve", "--r", action="store_true", default=False)
     parser.add_argument("--loop", choices=["continuous", "once"], default="continuous")
     parser.add_argument("--warmode", "--w", action="store_true", default=False)
+    parser.add_argument("--warmode-click-delay", "--wcd", type=int, default=0)
     parser.add_argument("--debug", "--d", action="store_true", default=False)
     parser.add_argument("--sms", "--s", action="store_true", default=False)
     parser.add_argument("--twilio_sid", "--tsid", default="")
@@ -238,6 +239,11 @@ def parse_bot_monitor_args(raw_text):
     if not args.url:
         raise ValueError("Missing URL. Usage: /monitor <url> [--f S51 --i 60 --reserve --loop once ...]")
     validate_booking_url(args.url)
+    wcd = int(getattr(args, "warmode_click_delay", 0) or 0)
+    if wcd < 0:
+        raise ValueError("--warmode-click-delay must be >= 0")
+    if wcd and not args.warmode:
+        raise ValueError("--warmode-click-delay requires --warmode")
     args.job_kind = "reserve" if args.reserve else "monitor"
     return args
 
@@ -301,14 +307,25 @@ def _monitor_more_menu_keyboard(rb):
         [InlineKeyboardButton("⏱ Interval: {}s".format(iv), callback_data="r:o:i")],
         [InlineKeyboardButton("🎲 Jitter: {}s".format(jv), callback_data="r:o:j")],
         [InlineKeyboardButton(reserve_label, callback_data="r:o:rv")],
-        [InlineKeyboardButton(loop_label, callback_data="r:o:l")],
-        [InlineKeyboardButton(sms_label, callback_data="r:o:sms")],
     ]
     if reserve_on:
+        wm = rb.get("warmode")
+        wm_btn = InlineKeyboardButton(
+            "🌅 Warmode{}".format(" ✓" if wm else ""), callback_data="r:o:w")
+        if wm:
+            wcd_val = int(rb.get("warmode_click_delay") or 0)
+            delay_btn = InlineKeyboardButton(
+                "⏱ WM delay: {}ms".format(wcd_val), callback_data="r:o:wcd")
+            rows.append([wm_btn, delay_btn])
+        else:
+            rows.append([wm_btn])
         rows.append([
-            InlineKeyboardButton("🌅 Warmode{}".format(" ✓" if rb.get("warmode") else ""), callback_data="r:o:w"),
             InlineKeyboardButton("🐛 Debug{}".format(" ✓" if rb.get("debug") else ""), callback_data="r:o:d"),
         ])
+    rows.extend([
+        [InlineKeyboardButton(loop_label, callback_data="r:o:l")],
+        [InlineKeyboardButton(sms_label, callback_data="r:o:sms")],
+    ])
     rows.append([InlineKeyboardButton("▶ Run", callback_data="r:e")])
     rows.append([
         InlineKeyboardButton("🔙 Back", callback_data="r:b"),
@@ -358,7 +375,8 @@ def _clear_user_flow(context):
 def _default_monitor_state(url):
     return {
         "url": url, "interval": 60, "jitter": 10, "filter": None,
-        "reserve": False, "loop": "continuous", "warmode": False, "debug": False,
+        "reserve": False, "loop": "continuous", "warmode": False,
+        "warmode_click_delay": 0, "debug": False,
         "sms": False, "twilio_sid": "", "twilio_auth_token": "",
         "twilio_number": "", "my_phone_number": "",
     }
@@ -380,6 +398,9 @@ def format_monitor_command_preview(rb):
         parts.append("--loop {}".format(rb["loop"]))
     if rb.get("warmode"):
         parts.append("--warmode")
+        wcd = int(rb.get("warmode_click_delay") or 0)
+        if wcd > 0:
+            parts.append("--warmode-click-delay {}".format(wcd))
     if rb.get("debug"):
         parts.append("--debug")
     if rb.get("sms"):
@@ -403,6 +424,9 @@ def monitor_state_to_shlex_raw(rb):
         chunks.extend(["--loop", rb["loop"]])
     if rb.get("warmode"):
         chunks.append("--warmode")
+        wcd = int(rb.get("warmode_click_delay") or 0)
+        if wcd > 0:
+            chunks.extend(["--warmode-click-delay", str(wcd)])
     if rb.get("debug"):
         chunks.append("--debug")
     if rb.get("sms"):
@@ -558,7 +582,9 @@ def _run_reserve_job(job, manager, bot, loop):
         if args.warmode:
             reserved_site = reserve_war_mode(
                 driver, args.url, args.filter,
-                timezone="US/Pacific", debug=args.debug, stop_event=job.stop_event)
+                timezone="US/Pacific", debug=args.debug, stop_event=job.stop_event,
+                warmode_click_delay_ms=int(getattr(args, "warmode_click_delay", 0) or 0),
+            )
         else:
             reserved_site = reserve_normal_mode(
                 driver, args.url, args.filter,
@@ -615,11 +641,12 @@ def telegram_help_text():
     return (
         "Campslinger Telegram commands\n\n"
         "/monitor <url> [--f S51,S52] [--i 60] [--jitter 10] [--reserve] "
-        "[--loop once|continuous] [--warmode] [--debug] [--sms + Twilio flags]\n\n"
+        "[--loop once|continuous] [--warmode [--warmode-click-delay MS]] [--debug] "
+        "[--sms + Twilio flags]\n\n"
         "Default: API-only monitoring, continuous.\n"
         "--reserve: also click Reserve on hit (Selenium).\n"
         "--loop once: stop after first hit.\n"
-        "Warmode uses 07:00 US/Pacific.\n\n"
+        "Warmode uses 07:00 US/Pacific; optional --warmode-click-delay is milliseconds after open.\n\n"
         "/jobs\n"
         "/status <job_id>\n"
         "/cancel <job_id>\n"
@@ -940,6 +967,25 @@ def run_telegram_bot(args):
                             reply_markup=_monitor_more_menu_keyboard(rb))
             return
 
+        if pend == "r_wcd":
+            context.user_data.pop(UD_PENDING, None)
+            rb = context.user_data.get(UD_MONITOR)
+            if not rb:
+                await _tg_reply(update, "Wizard expired.")
+                return
+            if not rb.get("warmode"):
+                await _tg_reply(update, "Warmode is off; turn it on in More first.")
+                return
+            try:
+                ms = int(txt.split()[0])
+            except ValueError:
+                await _tg_reply(update, "Send a whole number of milliseconds (0–120000), or open More again.")
+                return
+            rb["warmode_click_delay"] = max(0, min(120000, ms))
+            await _tg_reply(update, "Updated.\n\n{}".format(format_monitor_command_preview(rb)),
+                            reply_markup=_monitor_more_menu_keyboard(rb))
+            return
+
         if pend in ("r_tsid", "r_tat", "r_tn", "r_mpn"):
             context.user_data.pop(UD_PENDING, None)
             rb = context.user_data.get(UD_MONITOR)
@@ -1097,8 +1143,19 @@ def run_telegram_bot(args):
             await ack()
             if not rb: return
             rb["warmode"] = not rb.get("warmode")
+            if not rb["warmode"]:
+                rb["warmode_click_delay"] = 0
             await _edit_or_reply("{}\n\nPick an option:".format(format_monitor_command_preview(rb)),
                                 _monitor_more_menu_keyboard(rb))
+            return
+        if data == "r:o:wcd":
+            await ack()
+            if not rb or not rb.get("warmode"):
+                await q.message.reply_text("Turn on Warmode first.")
+                return
+            context.user_data[UD_PENDING] = "r_wcd"
+            await q.message.reply_text(
+                "Send warmode click delay in milliseconds after 07:00 open (e.g. 300). Range 0–120000, or abort.")
             return
         if data == "r:o:d":
             await ack()

@@ -111,7 +111,15 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
         time.sleep(0 if stop_event else wait_s)
 
 
-def reserve_war_mode(driver, url, requested_sites, timezone="US/Pacific", debug=False, stop_event=None):
+def reserve_war_mode(
+    driver,
+    url,
+    requested_sites,
+    timezone="US/Pacific",
+    debug=False,
+    stop_event=None,
+    warmode_click_delay_ms=0,
+):
     try:
         import pytz
         from datetime import timedelta
@@ -164,6 +172,16 @@ def reserve_war_mode(driver, url, requested_sites, timezone="US/Pacific", debug=
     if not wait_until(target_time):
         pp("🛑 Cancellation requested")
         return ""
+    delay_ms = max(0, int(warmode_click_delay_ms or 0))
+    if delay_ms > 0:
+        delay_s = delay_ms / 1000.0
+        pp("⏳ Warmode: waiting {} ms after open time before Reserve click…".format(delay_ms))
+        if stop_event:
+            if stop_event.wait(delay_s):
+                pp("🛑 Cancellation requested")
+                return ""
+        else:
+            time.sleep(delay_s)
     try:
         driver.execute_script("arguments[0].scrollIntoView(true);", reserve_button)
         if debug:
