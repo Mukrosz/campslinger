@@ -35,12 +35,12 @@ from campslinger.core import (
     labels_available_matching_filter,
 )
 from campslinger.log import (
-    _TERMINAL_LOG_ENABLED,
     _bot_console_line,
     pp,
     set_log_callback,
     set_telegram_job_meta,
     set_terminal_log_enabled,
+    terminal_log_enabled,
 )
 from campslinger.reserve_modes import reserve_normal_mode, reserve_war_mode
 from campslinger.selenium_ops import setup_webdriver, setup_webdriver_remote
@@ -642,17 +642,22 @@ def telegram_help_text():
         "Campslinger Telegram commands\n\n"
         "/monitor <url> [--f S51,S52] [--i 60] [--jitter 10] [--reserve] "
         "[--loop once|continuous] [--warmode [--warmode-click-delay MS]] [--debug] "
-        "[--sms + Twilio flags]\n\n"
-        "Default: API-only monitoring, continuous.\n"
-        "--reserve: also click Reserve on hit (Selenium).\n"
-        "--loop once: stop after first hit.\n"
-        "Warmode uses 07:00 US/Pacific; optional --warmode-click-delay is milliseconds after open.\n\n"
-        "/jobs\n"
-        "/status <job_id>\n"
-        "/cancel <job_id>\n"
-        "/help\n\n"
+        "[--sms + Twilio flags]\n"
+        "/jobs                       list your jobs\n"
+        "/status <job_id>            show one job's status\n"
+        "/cancel <job_id>            cancel a running job\n"
+        "/help                       this text + quick-action menu\n\n"
+        "Defaults: API-only monitoring, continuous loop.  --reserve adds Selenium\n"
+        "click-Reserve on hit.  --loop once stops after the first hit.  Warmode\n"
+        "fires at 07:00 US/Pacific; --warmode-click-delay (ms) waits briefly\n"
+        "after the open time to avoid 'Cannot Reserve' rejections.\n\n"
         "Tip: tap 📡 Monitor or send a plain booking URL for defaults.\n"
-        "Works with BC Parks, Ontario Parks, Parks Canada, and other Aspira platforms."
+        "Works with BC Parks, Ontario Parks, Parks Canada, and other Aspira /\n"
+        "GoingToCamp parks (see /help -> Supported parks in the README).\n\n"
+        "Privacy: Twilio credentials are NEVER written to the audit log; they\n"
+        "live only in the running job's memory.\n"
+        "Operator note: with --rip/--rp set, run the bot with --max-concurrent 1\n"
+        "since all jobs share one Chrome session."
     )
 
 
@@ -716,7 +721,7 @@ def run_telegram_bot(args):
                   error_type=type(err).__name__ if err else None,
                   error=str(err)[:500] if err else None)
         _bot_console_line("Telegram handler error: {!r}".format(err))
-        if _TERMINAL_LOG_ENABLED and err is not None:
+        if terminal_log_enabled() and err is not None:
             traceback.print_exception(type(err), err, err.__traceback__, file=sys.stderr)
         if update and authorized(update):
             em = getattr(update, "effective_message", None)

@@ -2,19 +2,35 @@
 """
 campslinger.py -- campsite monitoring and optional reservation (CLI).
 
-Supports parks on the Aspira / GoingToCamp platform (BC Parks, Ontario Parks,
-Parks Canada, Manitoba, Nova Scotia, New Brunswick, NL, Yukon, Michigan,
-Maryland, Mississippi, Nebraska, and more).
+Works with any park on the Aspira / GoingToCamp platform.  The booking-URL
+hostname must be on the allowlist in campslinger.util.SUPPORTED_PARK_HOSTS
+(BC Parks, Ontario Parks, Parks Canada, Manitoba, Nova Scotia, New Brunswick,
+NL, Yukon, Michigan, Maryland, Mississippi, Nebraska, ...).
 
-Default: API-only monitoring with terminal output and optional SMS.
-With --reserve: also drives Chrome to click Reserve when a site is available.
+Modes:
+  - Monitor (default): API-only polling with terminal output and optional SMS.
+                       No Chrome required.
+  - Reserve (--reserve): same polling, plus Selenium clicks Reserve on hit.
+  - Warmode (--reserve --warmode): no polling.  Prefetches the map at 06:59
+    in --timezone (default US/Pacific) and clicks Reserve at 07:00.  Optional
+    --warmode-click-delay (ms) lets you wait briefly after the open time to
+    avoid "Cannot Reserve" rejections from a server that hasn't crossed the
+    boundary yet.
+
+Notes:
+  - --debug only takes effect with --reserve (monitor-only mode has no
+    Selenium and no screenshots; a stderr note is emitted if you try).
+  - --headed and --rip/--rp also require --reserve.
+  - Twilio credentials, if used, are passed as flags; this script does not
+    read environment variables.
 
 Examples:
-  python3 campslinger.py --url '...'                         # monitor only
-  python3 campslinger.py --url '...' --reserve               # monitor + reserve
-  python3 campslinger.py --url '...' --loop once             # stop after first hit
-  python3 campslinger.py --url '...' --reserve --warmode     # 07:00 reserve window
-  python3 campslinger.py --url '...' --reserve --headed      # visible Chrome
+  python3 campslinger.py --url '...'                              # monitor only
+  python3 campslinger.py --url '...' --f S51,S52 --i 30           # filtered, fast
+  python3 campslinger.py --url '...' --f S51 --loop once          # stop on hit
+  python3 campslinger.py --url '...' --f S51 --reserve            # monitor + reserve
+  python3 campslinger.py --url '...' --reserve --warmode --wcd 400
+  python3 campslinger.py --url '...' --reserve --headed
   python3 campslinger.py --url '...' --reserve --rip HOST --rp 9222
 """
 
@@ -50,24 +66,25 @@ def build_arg_parser():
     description = (
         "Campsite monitoring and optional reservation.\n"
         "Works with any park on the Aspira / GoingToCamp platform\n"
-        "(BC Parks, Ontario Parks, Parks Canada, and many more).\n\n"
+        "(BC Parks, Ontario Parks, Parks Canada, and 9 more -- see\n"
+        "campslinger.util.SUPPORTED_PARK_HOSTS).\n\n"
         "Default: API-only monitoring (no Chrome).\n"
-        "With --reserve: Selenium clicks Reserve on hit.\n\n"
+        "With --reserve: Selenium clicks Reserve on hit.\n"
+        "Warmode targets 07:00 in --timezone (default US/Pacific).\n"
+        "--debug requires --reserve to produce screenshots.\n\n"
         "Examples:\n"
-        "  Monitor any availability:\n"
+        "  Monitor only (no Chrome):\n"
         "    ./campslinger.py --url 'https://camping.bcparks.ca/create-booking/...'\n"
         "    ./campslinger.py --url 'https://reservations.ontarioparks.ca/create-booking/...'\n\n"
-        "  Monitor specific sites:\n"
+        "  Filtered, fast polling:\n"
         "    ./campslinger.py --url '...' --f S51,S52 --i 30\n\n"
         "  Stop after first hit:\n"
         "    ./campslinger.py --url '...' --f S51 --loop once\n\n"
         "  Reserve on hit (Selenium):\n"
         "    ./campslinger.py --url '...' --f S51 --reserve\n\n"
-        "  Warmode reserve (07:00 US/Pacific):\n"
-        "    ./campslinger.py --url '...' --f S51 --reserve --warmode\n"
-        "  Warmode + 300 ms delay after open time before Reserve click:\n"
-        "    ./campslinger.py --url '...' --f S51 --reserve --warmode --wcd 300\n\n"
-        "  Reserve with remote Chrome:\n"
+        "  Warmode (07:00 US/Pacific) with 400 ms safety delay:\n"
+        "    ./campslinger.py --url '...' --f S51 --reserve --warmode --wcd 400\n\n"
+        "  Reserve with remote Chrome on the LAN:\n"
         "    ./campslinger.py --url '...' --reserve --rip 192.168.1.50 --rp 9222\n\n"
         "  SMS on availability (monitor or reserve):\n"
         "    ./campslinger.py --url '...' --sms --tsid X --tat X --tn X --mpn X"
@@ -132,6 +149,12 @@ def _validate_args(args):
         sys.exit("Error: --warmode-click-delay must be >= 0")
     if wcd and not args.warmode:
         sys.exit("Error: --warmode-click-delay is only valid with --warmode")
+    if args.debug and not args.reserve:
+        print(
+            "Note: --debug only takes effect with --reserve "
+            "(monitor-only mode has no Selenium/screenshots).",
+            file=sys.stderr, flush=True,
+        )
 
 
 def _setup_twilio(args):
