@@ -31,6 +31,12 @@ def set_terminal_log_enabled(enabled):
     _TERMINAL_LOG_ENABLED = bool(enabled)
 
 
+def terminal_log_enabled():
+    """Live read of the flag.  Use this from other modules instead of
+    importing _TERMINAL_LOG_ENABLED by name (which captures a stale copy)."""
+    return _TERMINAL_LOG_ENABLED
+
+
 def _bot_console_line(message):
     if _TERMINAL_LOG_ENABLED:
         print("{} - {}".format(current_time(), message), flush=True)

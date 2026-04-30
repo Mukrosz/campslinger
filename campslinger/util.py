@@ -13,7 +13,7 @@ SUPPORTED_PARK_HOSTS = (
     "reservation.pc.gc.ca",
     "camping.manitobaparks.com",
     "camping.novascotia.ca",
-    "camping.nbbparks.ca",
+    "camping.nbparks.ca",
     "camping.nlcamping.ca",
     "yukon.goingtocamp.com",
     "midnrreservations.com",
