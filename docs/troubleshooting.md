@@ -49,6 +49,21 @@ The site has been *placed in a hold* (likely yours, from a previous run on the s
 
 ## Telegram bot
 
+### Multi-job dashboard (`/help`, `/jobs`, `/menu`)
+
+`/help` appends a live list of your running jobs with inline buttons. Each job line shows:
+
+`job_id · park_name · stay_dates · site_filter · status`
+
+Tap a job for **Status**, **Cancel**, **Export**, **Edit**, or **Restart** (restart on finished jobs). Use **Cancel all** / **Export all** for bulk operations, or the `/cancelall` / `/exportall` commands.
+
+### Reboot recovery with `/exportall`
+
+1. Before shutdown, run `/exportall` in Telegram.
+2. Save the code block (one `/monitor …` line per running job).
+3. After the bot restarts, paste each line back into the chat.
+4. If any job used `--sms`, confirm the four `CAMPSLINGER_TWILIO_*` env vars are loaded in systemd — exported lines contain `--sms` only.
+
 ### "Unauthorized"
 
 Your numeric Telegram user ID isn't in `TELEGRAM_ALLOWED_USER_IDS`. Use `@userinfobot` to find it. Set the env var (comma-separated, no spaces) and restart the bot.
@@ -57,7 +72,7 @@ Your numeric Telegram user ID isn't in `TELEGRAM_ALLOWED_USER_IDS`. Use `@userin
 
 The JobManager cap is full. Either:
 
-- `/cancel <id>` an existing job.
+- `/cancel <id>` or `/cancelall` to stop running jobs.
 - Restart the bot with a higher `--max-concurrent`.
 
 > [!IMPORTANT]
@@ -82,6 +97,21 @@ These are caught by the global error handler. The full traceback prints to the s
 Fixed in the docs-overhaul release. Earlier versions imported `_TERMINAL_LOG_ENABLED` by name and never observed `set_terminal_log_enabled()`. If you're on an older revision, upgrade to head.
 
 ## SMS / Twilio
+
+### SMS enabled but job aborts immediately
+
+The job has `--sms` set but no complete Twilio credential set. Fix one of:
+
+1. **Server env defaults** — set all four in `.env` / systemd `EnvironmentFile=`:
+   - `CAMPSLINGER_TWILIO_SID`
+   - `CAMPSLINGER_TWILIO_AUTH_TOKEN`
+   - `CAMPSLINGER_TWILIO_NUMBER`
+   - `CAMPSLINGER_MY_PHONE_NUMBER`
+   Then toggle SMS on in the wizard (submenu shows `[env]` for env-supplied fields).
+
+2. **Per-job wizard** — enter all four fields manually in the SMS submenu under More.
+
+Audit log reason: `missing_twilio_creds`.
 
 ### `❌ Twilio module not installed`
 
@@ -130,3 +160,17 @@ Check write permissions on the directory. The bot logs a stderr warning (`Warnin
 
 - Two campslinger processes are running at the same time (e.g. forgotten background instance). Run `pgrep -a campslinger`.
 - Mixed shells with stale `--no-terminal-log` env / flag. Restart cleanly.
+
+### journalctl shows duplicate timestamps
+
+Under systemd, journald adds its own timestamp. The bot auto-detects `JOURNAL_STREAM` and suppresses the script's `YYYY-MM-DD HH:MM:SS -` prefix. If you still see both, add `--no-log-timestamp` to your systemd unit's `ExecStart=`.
+
+Example with auto-suppression:
+
+```text
+Jun 15 02:31:55 campoor python3[139657]: [Kikomun Creek Provincial Park | jun15-jun20 | s51] No availability. Checking again in ~64s
+```
+
+### Multiple jobs — can't tell log lines apart
+
+Each poll line includes `[Park | dates | sites]` in the prefix. If two jobs share the same park and dates, distinguish them by site filter or job id in `/jobs`.

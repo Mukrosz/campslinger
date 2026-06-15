@@ -6,7 +6,7 @@
 
 - **Operator visibility.** Every authorization decision, command, and job lifecycle event is recorded.
 - **Forensic-friendly.** Every line is a complete JSON object; you can filter with `jq` without context.
-- **Privacy by construction.** Twilio credentials never reach this file. They live in the running job's `JobState.args` only.
+- **Privacy by construction.** Twilio credentials never reach this file — whether typed in the wizard or loaded from `CAMPSLINGER_TWILIO_*` env vars. Export commands and `/exportall` also omit secrets from Telegram messages.
 
 ## Field reference
 
@@ -20,6 +20,8 @@
 | `job_id` | job-related actions | 8-char hex job id. |
 | `job_kind` | job-related actions | `monitor` or `reserve`. |
 | `url` | job-related actions | Full booking URL (used to filter by park). |
+| `park` | `job_queued` | Resolved park display name. |
+| `stay` | `job_queued` | Stay window label (e.g. `jun15-jun20`). |
 | `reserve` | `job_queued` | Boolean: did the user opt into Reserve? |
 | `loop` | `job_queued` | `continuous` or `once`. |
 | `warmode` | `job_queued` | Boolean. |
@@ -28,9 +30,11 @@
 | `status` | `job_finished` | `done`, `cancelled`, `failed`, `success`, or `error`. |
 | `result_site` | `job_finished` (success) | Reserved site label. |
 | `error` | `job_finished` (error) / `job_aborted` | Truncated error string. |
-| `reason` | `job_aborted` | Short machine-readable reason (`missing_twilio`, `webdriver_init_failed`). |
+| `reason` | `job_aborted` | Short machine-readable reason (`missing_twilio`, `missing_twilio_creds`, `webdriver_init_failed`). |
 | `accepted` | `command_cancel` | Boolean: did the cancellation succeed? |
 | `found` | `command_status` | Boolean: did the requested job belong to the requester? |
+| `count` | bulk commands | Number of jobs affected. |
+| `job_ids` | `command_cancelall` | Comma-separated ids that received a cancel signal. |
 | `max_concurrent` | `bot_start`, `job_rejected_busy` | Configured concurrency cap. |
 | `terminal_log` | `bot_start` | Whether `--no-terminal-log` was passed. |
 | `remote_chrome` | `bot_start` | `host:port` of the operator's remote Chrome, or absent. |
@@ -46,12 +50,15 @@
 | `command_help` | `/help` invoked. |
 | `command_monitor_usage` | `/monitor` with no arguments (wizard prompt). |
 | `command_jobs` | `/jobs` invoked. |
+| `command_menu` | `/menu` invoked (alias for `/jobs`). |
 | `command_status` | `/status` invoked or status callback used. |
 | `command_cancel` | `/cancel` invoked or cancel callback used. |
+| `command_cancelall` | `/cancelall` or **Cancel all** button. |
+| `command_exportall` | `/exportall` or **Export all** button. |
 | `job_queued` | A new job has been accepted into the JobManager. |
 | `job_rejected_busy` | `--max-concurrent` cap hit. |
 | `job_parse_error` | Malformed `/monitor …` arguments. |
-| `job_aborted` | Job ended before running (missing Twilio module, WebDriver init failure). |
+| `job_aborted` | Job ended before running (missing Twilio module/creds, WebDriver init failure). |
 | `job_finished` | Job ended (any terminal status). |
 | `text_message` | Free-text message that wasn't a command, URL, or wizard reply. |
 | `handler_error` | Telegram framework error raised inside a handler. |
@@ -59,9 +66,11 @@
 ## Sample lines
 
 ```json
-{"ts":"2026-04-30T11:14:00","action":"bot_start","max_concurrent":3,"terminal_log":true,"audit_log_path":"/var/log/campslinger/audit.log"}
-{"ts":"2026-04-30T11:21:14","action":"job_queued","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"reserve","reserve":true,"loop":"once","warmode":true,"interval":30,"filter":"s51,s52"}
-{"ts":"2026-04-30T11:26:02","action":"job_finished","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","status":"success","result_site":"s51","url":"https://camping.bcparks.ca/create-booking/results?…"}
+{"ts":"2026-06-15T02:30:00","action":"bot_start","max_concurrent":3,"terminal_log":true,"audit_log_path":"/var/log/campslinger/audit.log"}
+{"ts":"2026-06-15T02:31:00","action":"job_queued","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor","reserve":false,"loop":"continuous","warmode":false,"interval":60,"filter":"s51,s52","park":"Kikomun Creek Provincial Park","stay":"jun15-jun20"}
+{"ts":"2026-06-15T02:45:00","action":"command_cancelall","user_id":11111111,"chat_id":11111111,"count":2,"job_ids":"a1b2c3d4,b5c6d7e8"}
+{"ts":"2026-06-15T02:46:00","action":"command_exportall","user_id":11111111,"chat_id":11111111,"count":3}
+{"ts":"2026-06-15T03:10:00","action":"job_finished","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","status":"done","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor"}
 ```
 
 ## Useful `jq` queries
@@ -72,6 +81,12 @@ jq -c 'select(.user_id == 11111111)' audit.log
 
 # Successful reservations only
 jq -c 'select(.action == "job_finished" and .status == "success")' audit.log
+
+# Jobs at a specific park (by display name)
+jq -c 'select(.action == "job_queued" and .park | test("Kikomun"))' audit.log
+
+# Bulk cancel events
+jq -c 'select(.action == "command_cancelall")' audit.log
 
 # Unauthorized attempts in the last 24h
 jq -c 'select(.action == "unauthorized")' audit.log | tail -50
@@ -101,7 +116,8 @@ jq -r 'select(.action == "job_queued") | .user_id' audit.log | sort | uniq -c | 
 
 ## What is **not** in the audit log
 
-- Twilio Account SID, auth token, "from" number, "to" number — never written.
+- Twilio Account SID, auth token, "from" number, "to" number — never written, including when loaded from env.
 - The Telegram bot token — never written.
+- Exported `/monitor …` command strings from `/exportall` — sent to Telegram chat only, not logged.
 - Map screenshots and HTML dumps from `--debug` — saved to disk separately, not into the audit log.
 - Free-text bodies of cancellation prompts and other `text_handler` messages — only a 200-character preview is logged for `text_message` events.

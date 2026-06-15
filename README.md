@@ -101,13 +101,25 @@ python3 campslinger.py \
 ```
 
 <details>
-<summary>Sample terminal output</summary>
+<summary>Sample terminal output (interactive shell)</summary>
 
 ```text
-2026-04-30 11:20:14 - [Kikomun Creek Provincial Park] ✨ Available: s2,s3,s8 | ❌ None of your preferred sites (s51,s52) are free.
-2026-04-30 11:20:44 - [Kikomun Creek Provincial Park] ✨ Available: s2,s3,s8,s51 | ❌ None of your preferred sites (s51,s52) are free.
-2026-04-30 11:21:14 - [Kikomun Creek Provincial Park] ✅ Available sites: s51
+2026-06-15 02:31:55 - [Kikomun Creek Provincial Park | jun15-jun20 | s51,s52] No availability. Checking again in ~64s
+2026-06-15 02:32:59 - [Kikomun Creek Provincial Park | jun15-jun20 | s51,s52] ✅ Available sites: s51
 ```
+
+</details>
+
+<details>
+<summary>Sample output under systemd / journalctl (no duplicate timestamp)</summary>
+
+When `campslinger_tg.py` runs as a systemd service, journald adds its own timestamp and the script suppresses its prefix automatically:
+
+```text
+Jun 15 02:31:55 campoor python3[139657]: [Kikomun Creek Provincial Park | jun15-jun20 | s51,s52] No availability. Checking again in ~64s
+```
+
+Force the script timestamp back with `--log-timestamp` on the `ExecStart=` line if you prefer both.
 
 </details>
 
@@ -201,6 +213,10 @@ python3 campslinger.py --url '…' --sms --tsid X --tat X --tn X --mpn X
 | `--twilio_auth_token` / `--tat` | — | Twilio auth token. |
 | `--twilio_number` / `--tn` | — | Twilio sending phone number (E.164 format, e.g. `+15555550100`). |
 | `--my_phone_number` / `--mpn` | — | Your destination number (E.164 format). |
+| `--log-timestamp` | auto | Force a `YYYY-MM-DD HH:MM:SS -` prefix on every log line. |
+| `--no-log-timestamp` | auto | Omit the script timestamp. **Default under systemd journald** (`JOURNAL_STREAM` set). |
+
+Log lines include a context prefix when park/dates are known: `[Park Name | jun15-jun20 | s51,s52] message`.
 
 ### Booking URL
 
@@ -231,7 +247,7 @@ Same features as the CLI, controlled from Telegram. **Monitor is the primary act
 | 📡 **Monitor** | always on | Tap **📡 Monitor** or send `/monitor <url>`. |
 | ⛺ **Reserve** | off | Toggle in More menu, or send `--reserve`. |
 | 🔄 **Loop** | continuous | More menu, or `--loop once`. |
-| 📱 **SMS / Twilio** | off | Configure in the SMS submenu under More. |
+| 📱 **SMS / Twilio** | off | Toggle in SMS submenu. If all four `CAMPSLINGER_TWILIO_*` env vars are set on the server, SMS works without entering credentials in the wizard. |
 | 🌅 **Warmode** | off | Visible only when Reserve is on (row below Reserve). |
 | ⏱ **WM delay** | `0 ms` | Visible only when Warmode is on; tap to set milliseconds (= `--warmode-click-delay`). |
 | 🐛 **Debug** | off | Visible only when Reserve is on. |
@@ -346,6 +362,20 @@ WantedBy=multi-user.target
 > [!NOTE]
 > The bot uses **long polling**, so no inbound port / webhook / public IP is required. It works behind NAT.
 
+### Environment variables (Telegram bot)
+
+| Variable | Required? | Purpose |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | yes | Bot token from [@BotFather](https://t.me/BotFather). |
+| `TELEGRAM_ALLOWED_USER_IDS` | yes | Comma-separated numeric Telegram user IDs allowed to use the bot. |
+| `CAMPSLINGER_AUDIT_LOG` | no | Audit log path (default `./campslinger_telegram_audit.log`). |
+| `CAMPSLINGER_TWILIO_SID` | no | Default Twilio Account SID for all SMS-enabled jobs. |
+| `CAMPSLINGER_TWILIO_AUTH_TOKEN` | no | Default Twilio auth token. |
+| `CAMPSLINGER_TWILIO_NUMBER` | no | Default Twilio sending number (E.164). |
+| `CAMPSLINGER_MY_PHONE_NUMBER` | no | Default destination number (E.164). |
+
+See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinger.py`) does **not** read environment variables — flags only.
+
 ### Process flags (operator)
 
 | Flag (long / aliases) | Description |
@@ -358,16 +388,43 @@ WantedBy=multi-user.target
 
 ### Telegram user guide
 
-- **`/help`** — command reference **plus a live dashboard** of your running jobs (tap a job for Status / Cancel / Export / Edit / Restart).
+#### Commands
+
+| Command | Description |
+|---|---|
+| `/help` | Command reference **plus a live dashboard** of your running jobs |
+| `/monitor <url> [flags]` | Start a job (or tap **📡 Monitor** for the wizard) |
+| `/jobs`, `/menu` | Same view: active jobs with inline buttons |
+| `/status <job_id>` | Full status for one job (park, dates, sites, kind, result) |
+| `/cancel <job_id>` | Cancel one running job |
+| `/cancelall` | Cancel **all** your running jobs |
+| `/exportall` | Export copy-paste `/monitor …` lines for every running job |
+
+#### Per-job actions (buttons on `/help`, `/jobs`, or job detail)
+
+| Button | When available | What it does |
+|---|---|---|
+| **Status** | always | Refresh job details |
+| **Cancel** | job is running | Request cancellation |
+| **Export** | always | Show one `/monitor …` line (no Twilio secrets) |
+| **Edit** | always | Open the wizard prefilled; **Run** replaces the job if still active |
+| **Restart** | job has finished | Re-queue the same settings as a new job |
+
+Bulk buttons on the job overview: **Cancel all**, **Export all**.
+
+#### Monitor wizard
+
 - **📡 Monitor** wizard:
   1. Paste the booking URL.
   2. **▶️ Go** runs with defaults. **⚙️ More** opens the option menu.
   3. More menu order: **Sites → Interval → Jitter → Reserve → (Warmode → WM delay → Debug if Reserve is on) → Loop → SMS**.
   4. Tap **▶ Run** (equivalent to **▶️ Go**) when ready.
-- **`/jobs`** or **`/menu`** — job list with inline buttons; **`/cancelall`** / **`/exportall`** for bulk stop or backup before a reboot.
-- **`/status <id>`**, **`/cancel <id>`** — job control. Each user only sees their own jobs.
 - **Plain URL message** — starts a default monitor job (no Reserve).
 - **One-liner** — `/monitor <url> --f S51 --reserve --loop once`.
+
+#### Reboot recovery
+
+Before restarting the server, run **`/exportall`** (or tap **Export all** on `/help`). Save the code block. After the bot is back up, paste each `/monitor …` line into Telegram to restore every job. If jobs used `--sms`, ensure the four `CAMPSLINGER_TWILIO_*` env vars are still loaded — exported commands contain `--sms` only, not credentials.
 
 ### Audit log
 
@@ -376,24 +433,28 @@ Default path is `./campslinger_telegram_audit.log` (override with `CAMPSLINGER_A
 | Field | Always? | Meaning |
 |---|---|---|
 | `ts` | yes | ISO timestamp (seconds). |
-| `action` | yes | `bot_start`, `command_help`, `job_queued`, `job_finished`, `unauthorized`, … |
+| `action` | yes | `bot_start`, `command_help`, `command_jobs`, `command_menu`, `command_cancelall`, `command_exportall`, `job_queued`, `job_finished`, … |
 | `user_id` | usually | Telegram numeric user ID. |
 | `chat_id` | usually | Telegram chat ID. |
 | `job_id` | when relevant | 8-char hex job id. |
 | `url` | when relevant | Full booking URL (lookup-friendly). |
+| `park` | `job_queued` | Resolved park display name. |
+| `stay` | `job_queued` | Stay window label (e.g. `jun15-jun20`). |
 | `job_kind` | when relevant | `monitor` or `reserve`. |
 | `status` | on completion | `done`, `cancelled`, `failed`, `success`, `error`. |
 | `result_site` | on success | Reserved site label. |
 | `error` | on error | Truncated error string. |
+| `count` | bulk commands | Number of jobs affected (`command_cancelall`, `command_exportall`). |
+| `job_ids` | `command_cancelall` | Comma-separated ids that received a cancel signal. |
 
 > [!NOTE]
-> Twilio credentials are **never** written to the audit log. They live in per-job `JobState.args` and are scrubbed from the queued/finished records.
+> Twilio credentials are **never** written to the audit log — whether entered in the wizard or loaded from `CAMPSLINGER_TWILIO_*` env vars. Export commands emit `--sms` only.
 
 <details>
 <summary>Sample audit-log line</summary>
 
 ```json
-{"ts":"2026-04-30T11:21:14","action":"job_queued","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"reserve","reserve":true,"loop":"once","warmode":false,"interval":30,"filter":"s51,s52"}
+{"ts":"2026-06-15T02:31:00","action":"job_queued","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor","reserve":false,"loop":"continuous","warmode":false,"interval":60,"filter":"s51,s52","park":"Kikomun Creek Provincial Park","stay":"jun15-jun20"}
 ```
 
 </details>
@@ -525,6 +586,34 @@ You hit `--max-concurrent`. Cancel a running job (`/cancel <id>`) or restart the
 <summary><strong>Telegram bot stops sending messages</strong></summary>
 
 Telegram rate-limits bots (~30 messages/sec, ~1/sec per chat). If you saturate the limit, the library will retry. Reduce `--debug` chatter and `--jitter`/`--interval` saturation, or split heavy users across multiple bots.
+
+</details>
+
+<details>
+<summary><strong>journalctl shows duplicate timestamps or I can't tell jobs apart</strong></summary>
+
+Upgrade to the latest `main`. Under systemd the script auto-detects `JOURNAL_STREAM` and omits its own timestamp prefix. Every poll line also includes `[Park | dates | sites]` so multiple concurrent jobs are distinguishable:
+
+```text
+Jun 15 02:31:55 campoor python3[139657]: [Kikomun Creek Provincial Park | jun15-jun20 | s51] No availability…
+Jun 15 02:31:56 campoor python3[139657]: [Another Park | jul01-jul05 | all] No availability…
+```
+
+If you still see a script timestamp before the bracket, add `--no-log-timestamp` to your systemd `ExecStart=`.
+
+</details>
+
+<details>
+<summary><strong>SMS enabled but job aborts with missing Twilio credentials</strong></summary>
+
+Either enter all four Twilio fields in the wizard SMS submenu, **or** set all four `CAMPSLINGER_TWILIO_*` env vars on the server (see [.env.example](.env.example)) and toggle SMS on. The SMS submenu shows `[env]` next to fields supplied by the environment.
+
+</details>
+
+<details>
+<summary><strong>How do I restore jobs after a server reboot?</strong></summary>
+
+Before shutdown, run **`/exportall`** in Telegram and save the code block. After the bot restarts, paste each `/monitor …` line back into the chat. SMS jobs need the Twilio env vars loaded again; exported lines contain `--sms` but not secrets.
 
 </details>
 

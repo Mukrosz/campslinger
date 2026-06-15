@@ -4,15 +4,21 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## 2026-06-14 — Multi-job UX, logging, Twilio env defaults
+
 ### Added
-- **Multi-job UX:** `/help` now shows a live job dashboard with per-job buttons (Status, Cancel, Export, Edit, Restart).
+- **Multi-job UX:** `/help` shows a live job dashboard with per-job buttons (Status, Cancel, Export, Edit, Restart).
 - **`/menu`** alias for `/jobs`; **`/cancelall`** and **`/exportall`** bulk commands (also available as inline buttons).
 - **Env-based Twilio defaults:** `CAMPSLINGER_TWILIO_*` env vars so SMS can be toggled per job without re-entering credentials.
 - **Richer job listings:** `/jobs`, `/status`, and logs show park name, stay dates (`jun15-jun20`), and site filter.
 - **journald-friendly logging:** script timestamps auto-suppressed under systemd (`JOURNAL_STREAM`); override with `--log-timestamp` / `--no-log-timestamp`.
 - **Log context prefix:** `[Park | dates | sites]` on every poll line so multiple jobs are distinguishable in `journalctl`.
+- **API poll errors** include exception class name (e.g. `ReadTimeout`) for easier diagnosis.
 
 ### Documentation
+- Updated README, `docs/architecture.md`, `docs/audit-log.md`, and `docs/troubleshooting.md` for multi-job dashboard, env vars, logging, and reboot recovery workflow.
+
+## 2026-04-30 — Documentation overhaul
 - Cross-compared scripts against `README.md` and rewrote it for clarity, scannability, and visual polish (badges, callouts, sample outputs, mermaid sequence diagrams, anchor-safe headings).
 - Added `docs/architecture.md`, `docs/audit-log.md`, and `docs/troubleshooting.md`.
 - Added `.env.example` covering exactly the three environment variables the bot actually reads, with an explicit "what is NOT an env variable" section.

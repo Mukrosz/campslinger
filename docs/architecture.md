@@ -28,10 +28,10 @@ campslinger/
 | Module | Responsibility |
 |---|---|
 | `core.py` | Stateless park-API client. Pulls site availability JSON and resolves the park's display name. The API base is derived from the booking URL host (`api_base_from_url`). |
-| `log.py` | `pp()` is the single log entry point. In CLI mode it prints; in bot mode a `set_log_callback()` mirrors lines to Telegram, with an optional digest tuple to dedupe noisy "still polling" lines. |
-| `reserve_modes.py` | High-level reservation strategies: `reserve_normal_mode` polls until a match is available then drives Selenium; `reserve_war_mode` prefetches the map at 06:59 and clicks Reserve at 07:00 (+ optional click-delay). |
+| `log.py` | `pp()` is the single log entry point. Builds `[Park | dates | sites]` context prefixes via `set_job_log_context()`. Auto-suppresses script timestamps under systemd journald (`JOURNAL_STREAM`); override with `--log-timestamp` / `--no-log-timestamp`. In bot mode, `set_log_callback()` mirrors lines to Telegram with digest-based deduplication. |
+| `reserve_modes.py` | High-level reservation strategies: `reserve_normal_mode` polls until a match is available then drives Selenium; `reserve_war_mode` prefetches the map at 06:59 and clicks Reserve at 07:00 (+ optional click-delay). API errors log the exception class name. |
 | `selenium_ops.py` | All WebDriver interaction: `setup_webdriver`, `setup_webdriver_remote`, `prepare_reservation`, `get_available_sites`, `_dump_map_load_failure`. |
-| `util.py` | URL allowlist + validation, descriptive screenshot path builder, comma list / sort helpers, SMS helper. |
+| `util.py` | URL allowlist + validation, `stay_window_label()` for human-friendly date ranges, descriptive screenshot path builder, comma list / sort helpers, SMS helper. |
 
 ## Shared library, thin entrypoints
 
@@ -69,9 +69,51 @@ stateDiagram-v2
 ### JobManager invariants
 
 - `JobManager.create()` returns `None` if `len(active) >= max_concurrent` — the caller responds with "Server busy".
-- Each job carries a `threading.Event` (`stop_event`). `JobManager.cancel_for_user()` sets it; the worker thread polls it during sleeps and inside `reserve_*_mode` between Selenium steps.
+- Each job carries a `threading.Event` (`stop_event`). `JobManager.cancel_for_user()` sets it; `cancel_all_for_user()` cancels every active job for a user. The worker thread polls `stop_event` during sleeps and inside `reserve_*_mode` between Selenium steps.
 - All access to `active` and `recent` is under `self._lock`. The deque caps `recent` at `recent_max=40`.
 - Per-user filtering (`*_for_user`) is the gate that keeps users from seeing each other's jobs.
+
+### JobState display fields
+
+At queue time each job resolves and caches:
+
+| Field | Source | Example |
+|---|---|---|
+| `park_name` | `fetch_park_name(url)` | `Kikomun Creek Provincial Park` |
+| `stay_label` | `stay_window_label(url)` | `jun15-jun20` |
+| `site_filter` | `--f` argument | `s51,s52` or `None` (shown as `all`) |
+
+These appear in `/jobs`, `/status`, `/help` dashboard listings, and the terminal log prefix.
+
+## Telegram commands (multi-job UX)
+
+| Command / callback | Handler | Purpose |
+|---|---|---|
+| `/help` | `help_cmd` | Help text + live running-jobs dashboard with buttons |
+| `/jobs`, `/menu` | `jobs_cmd`, `menu_cmd` | Same overview via `_jobs_overview_text()` |
+| `/cancelall`, `j:ca` | `cancelall_cmd` | `cancel_all_for_user()` |
+| `/exportall`, `j:xa` | `exportall_cmd` | `monitor_args_to_command()` per active job |
+| `j:d:<id>` | detail view | Status text + `_job_detail_keyboard()` |
+| `j:x:<id>` | export one job | Single `/monitor …` line, no Twilio secrets |
+| `j:e:<id>` | edit | Prefill wizard; Run cancels original if still active |
+| `j:r:<id>` | restart | Re-queue from stored args via `_args_for_restart_shlex()` |
+
+## Twilio env defaults
+
+When all four `CAMPSLINGER_TWILIO_*` env vars are set, `_apply_twilio_env_to_args()` fills empty fields on job start. The wizard SMS submenu shows `[env]` for env-supplied fields. Export/restart paths never embed secrets in Telegram messages — they emit `--sms` only and rely on env at runtime.
+
+## Logging under systemd
+
+```mermaid
+flowchart LR
+    job[Job thread] -->|set_job_log_context| ctx["threading.local: park, stay, filter"]
+    ctx --> pp["pp() -> _format_log_line()"]
+    pp -->|JOURNAL_STREAM unset| shell["stdout with script timestamp"]
+    pp -->|JOURNAL_STREAM set| journald["stdout without script timestamp"]
+    journald --> journalctl["journalctl adds system timestamp"]
+```
+
+Configure via `configure_log_timestamps()` at process start. CLI and bot both accept `--log-timestamp` / `--no-log-timestamp`.
 
 ## Logging digest deduplication
 
@@ -81,7 +123,7 @@ stateDiagram-v2
 |---|---|
 | `("zero",)` | "no availability" — same shape every poll. |
 | `("filter_wait", frozenset(all_avail), tuple(args.filter or ()))` | "available, but none of your preferred sites" — collapses while the available set is unchanged. |
-| `("api_err", str(e)[:220])` | API exception — collapses bursts of identical errors. |
+| `("api_err", type_name, err_snippet)` | API exception — collapses bursts of identical errors. Includes exception class name. |
 | `None` | Always send to Telegram. |
 
 If the new digest equals the previously recorded one (per-thread), the Telegram callback is skipped. Terminal output is always printed.
