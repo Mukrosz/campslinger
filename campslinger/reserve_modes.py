@@ -33,7 +33,8 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
         try:
             sites = fetch_sites_map(url)
         except Exception as e:
-            pp("❌ API poll failed: {}".format(e), telegram_digest=("api_err", str(e)[:220]))
+            pp("❌ API poll failed ({}): {}".format(type(e).__name__, e),
+               telegram_digest=("api_err", type(e).__name__, str(e)[:200]))
             if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
                 return ""

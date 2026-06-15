@@ -35,6 +35,7 @@ Examples:
 """
 
 import argparse
+import os
 import sys
 import time
 
@@ -44,7 +45,14 @@ from campslinger.core import (
     fetch_sites_map,
     labels_available_matching_filter,
 )
-from campslinger.log import pp, set_park_name
+from campslinger.log import (
+    configure_log_timestamps,
+    pp,
+    set_job_log_context,
+    set_log_callback,
+    set_terminal_log_enabled,
+    terminal_log_enabled,
+)
 from campslinger.reserve_modes import reserve_normal_mode, reserve_war_mode
 from campslinger.selenium_ops import setup_webdriver, setup_webdriver_remote
 from campslinger.util import (
@@ -54,6 +62,7 @@ from campslinger.util import (
     send_sms,
     shorten_url,
     sort_key,
+    stay_window_label,
     validate_booking_url,
 )
 
@@ -129,6 +138,11 @@ def build_arg_parser():
                     help="Twilio sending phone number.")
     p.add_argument("--my_phone_number", "--mpn", default="", metavar="TO",
                     help="Your phone number to receive SMS.")
+    ts_group = p.add_mutually_exclusive_group()
+    ts_group.add_argument("--log-timestamp", action="store_true", dest="log_timestamp",
+                          default=None, help="Prefix log lines with a timestamp (default: auto).")
+    ts_group.add_argument("--no-log-timestamp", action="store_false", dest="log_timestamp",
+                          help="Omit script timestamps (auto-off under systemd journald).")
     return p
 
 
@@ -174,7 +188,7 @@ def _monitor_loop(args, client):
         try:
             sites = fetch_sites_map(args.url)
         except Exception as e:
-            pp("❌ API poll failed: {}".format(e))
+            pp("❌ API poll failed ({}): {}".format(type(e).__name__, e))
             time.sleep(wait_s)
             continue
 
@@ -209,10 +223,16 @@ def _monitor_loop(args, client):
 
 def main():
     args = build_arg_parser().parse_args()
+    configure_log_timestamps(getattr(args, "log_timestamp", None))
     _validate_args(args)
 
     park = fetch_park_name(args.url)
-    set_park_name(park)
+    stay = stay_window_label(args.url)
+    site_filter = ",".join(args.filter) if args.filter else None
+    set_job_log_context(
+        park_name=park, stay_label=stay, site_filter=site_filter,
+        interval_seconds=args.interval, interval_jitter_seconds=args.jitter,
+    )
     client = _setup_twilio(args)
 
     if not args.reserve:

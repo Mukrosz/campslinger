@@ -4,6 +4,14 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Added
+- **Multi-job UX:** `/help` now shows a live job dashboard with per-job buttons (Status, Cancel, Export, Edit, Restart).
+- **`/menu`** alias for `/jobs`; **`/cancelall`** and **`/exportall`** bulk commands (also available as inline buttons).
+- **Env-based Twilio defaults:** `CAMPSLINGER_TWILIO_*` env vars so SMS can be toggled per job without re-entering credentials.
+- **Richer job listings:** `/jobs`, `/status`, and logs show park name, stay dates (`jun15-jun20`), and site filter.
+- **journald-friendly logging:** script timestamps auto-suppressed under systemd (`JOURNAL_STREAM`); override with `--log-timestamp` / `--no-log-timestamp`.
+- **Log context prefix:** `[Park | dates | sites]` on every poll line so multiple jobs are distinguishable in `journalctl`.
+
 ### Documentation
 - Cross-compared scripts against `README.md` and rewrote it for clarity, scannability, and visual polish (badges, callouts, sample outputs, mermaid sequence diagrams, anchor-safe headings).
 - Added `docs/architecture.md`, `docs/audit-log.md`, and `docs/troubleshooting.md`.

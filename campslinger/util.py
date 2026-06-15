@@ -81,6 +81,12 @@ def _stay_window_slug(booking_url):
         return "nostay"
 
 
+def stay_window_label(booking_url):
+    """Human-friendly stay window for logs and job listings (e.g. jun15-jun20)."""
+    slug = _stay_window_slug(booking_url)
+    return slug if slug != "nostay" else "?"
+
+
 def build_debug_screenshot_path(
     booking_url, park_name, short_tag, directory=None, file_timestamp=None
 ):

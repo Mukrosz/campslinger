@@ -36,9 +36,10 @@ from campslinger.core import (
 )
 from campslinger.log import (
     _bot_console_line,
+    configure_log_timestamps,
     pp,
+    set_job_log_context,
     set_log_callback,
-    set_telegram_job_meta,
     set_terminal_log_enabled,
     terminal_log_enabled,
 )
@@ -51,12 +52,20 @@ from campslinger.util import (
     send_sms,
     shorten_url,
     sort_key,
+    stay_window_label,
     validate_booking_url,
 )
 
 _REMOTE_CHROME = None
 _audit_lock = threading.Lock()
 _audit_write_warned = False
+
+_TWILIO_ENV = {
+    "twilio_sid": "CAMPSLINGER_TWILIO_SID",
+    "twilio_auth_token": "CAMPSLINGER_TWILIO_AUTH_TOKEN",
+    "twilio_number": "CAMPSLINGER_TWILIO_NUMBER",
+    "my_phone_number": "CAMPSLINGER_MY_PHONE_NUMBER",
+}
 
 
 def audit_log(action, user_id=None, chat_id=None, **fields):
@@ -100,6 +109,9 @@ class JobState:
     error: Optional[str] = None
     stop_event: threading.Event = field(default_factory=threading.Event)
     thread: Optional[threading.Thread] = None
+    park_name: Optional[str] = None
+    stay_label: Optional[str] = None
+    site_filter: Optional[str] = None
 
 
 class JobManager:
@@ -183,6 +195,19 @@ class JobManager:
             job.stop_event.set()
             return True
 
+    def cancel_all_for_user(self, user_id):
+        with self._lock:
+            cancelled = []
+            for job_id, job in list(self.active.items()):
+                if job.user_id == user_id:
+                    job.stop_event.set()
+                    cancelled.append(job_id)
+            return cancelled
+
+    def is_active(self, job_id):
+        with self._lock:
+            return job_id in self.active
+
 
 # ---------------------------------------------------------------------------
 # Process-level argparse (host flags only)
@@ -199,6 +224,11 @@ def build_telegram_arg_parser():
                     help="Operator only: Chrome remote debugging host (same LAN). Use with --rp.")
     p.add_argument("--rp", "--remote_port", dest="remote_port", type=int, default=None, metavar="PORT",
                     help="Operator only: remote debugging port (e.g. 9222). Use with --rip.")
+    ts_group = p.add_mutually_exclusive_group()
+    ts_group.add_argument("--log-timestamp", action="store_true", dest="log_timestamp",
+                          default=None, help="Prefix log lines with a timestamp (default: auto).")
+    ts_group.add_argument("--no-log-timestamp", action="store_false", dest="log_timestamp",
+                          help="Omit script timestamps (auto-off under systemd journald).")
     return p
 
 
@@ -249,6 +279,209 @@ def parse_bot_monitor_args(raw_text):
 
 
 # ---------------------------------------------------------------------------
+# Twilio env defaults + job display / export helpers
+# ---------------------------------------------------------------------------
+
+def _twilio_from_env():
+    return {k: (os.getenv(env) or "").strip() for k, env in _TWILIO_ENV.items()}
+
+
+def _twilio_env_ready():
+    return all(_twilio_from_env().values())
+
+
+def _apply_twilio_env_to_args(args):
+    for field, value in _twilio_from_env().items():
+        if value and not getattr(args, field, ""):
+            setattr(args, field, value)
+
+
+def _args_to_monitor_state(args):
+    return {
+        "url": args.url,
+        "interval": args.interval,
+        "jitter": getattr(args, "jitter", 10),
+        "filter": list(args.filter) if args.filter else None,
+        "reserve": bool(args.reserve),
+        "loop": args.loop,
+        "warmode": bool(getattr(args, "warmode", False)),
+        "warmode_click_delay": int(getattr(args, "warmode_click_delay", 0) or 0),
+        "debug": bool(getattr(args, "debug", False)),
+        "sms": bool(args.sms),
+        "twilio_sid": args.twilio_sid or "",
+        "twilio_auth_token": args.twilio_auth_token or "",
+        "twilio_number": args.twilio_number or "",
+        "my_phone_number": args.my_phone_number or "",
+    }
+
+
+def monitor_args_to_command(args):
+    """Copy-pasteable /monitor line; never includes Twilio secrets."""
+    parts = ["/monitor", args.url]
+    if args.filter:
+        parts.append("--f {}".format(",".join(args.filter)))
+    if int(args.interval or 60) != 60:
+        parts.append("--i {}".format(args.interval))
+    jv = max(0, int(getattr(args, "jitter", 10) or 10))
+    if jv != 10:
+        parts.append("--jitter {}".format(jv))
+    if args.reserve:
+        parts.append("--reserve")
+    if args.loop != "continuous":
+        parts.append("--loop {}".format(args.loop))
+    if getattr(args, "warmode", False):
+        parts.append("--warmode")
+        wcd = int(getattr(args, "warmode_click_delay", 0) or 0)
+        if wcd > 0:
+            parts.append("--warmode-click-delay {}".format(wcd))
+    if getattr(args, "debug", False):
+        parts.append("--debug")
+    if args.sms:
+        parts.append("--sms")
+    return " ".join(parts)
+
+
+def _populate_job_metadata(job):
+    job.park_name = fetch_park_name(job.args.url) or "Unknown park"
+    job.stay_label = stay_window_label(job.args.url)
+    job.site_filter = ",".join(job.args.filter) if job.args.filter else None
+
+
+def _job_filter_display(job):
+    return job.site_filter or "all"
+
+
+def _job_brief_line(job):
+    return "{} · {} · {} · {} · {}".format(
+        job.job_id, job.park_name or "?", job.stay_label or "?",
+        _job_filter_display(job), job.status)
+
+
+def _job_is_active(job, manager):
+    return manager.is_active(job.job_id)
+
+
+def _format_status_text(job):
+    if not job:
+        return "Job not found or not yours."
+    lines = [
+        "job={}".format(job.job_id),
+        "park={}".format(job.park_name or "?"),
+        "dates={}".format(job.stay_label or "?"),
+        "sites={}".format(_job_filter_display(job)),
+        "kind={}".format(getattr(job.args, "job_kind", "?")),
+        "status={}".format(job.status),
+        "started={}".format(job.started_at),
+        "ended={}".format(job.ended_at or "-"),
+        "result={}".format(job.result_site or "-"),
+        "error={}".format(job.error or "-"),
+    ]
+    mode_bits = []
+    if getattr(job.args, "reserve", False):
+        mode_bits.append("reserve")
+    if getattr(job.args, "warmode", False):
+        mode_bits.append("warmode")
+    if job.args.loop != "continuous":
+        mode_bits.append("loop={}".format(job.args.loop))
+    if job.args.sms:
+        mode_bits.append("sms")
+    if mode_bits:
+        lines.append("options={}".format(", ".join(mode_bits)))
+    return "\n".join(lines)
+
+
+def _jobs_overview_text(manager, user_id, include_recent=True):
+    active = manager.list_active_for_user(user_id)
+    lines = ["Your running jobs ({}):".format(len(active))]
+    if active:
+        for job in active:
+            lines.append("• " + _job_brief_line(job))
+    else:
+        lines.append("No running jobs.")
+    if include_recent:
+        recent = manager.list_recent_for_user(user_id, 5)
+        active_ids = {j.job_id for j in active}
+        finished = [j for j in recent if j.job_id not in active_ids]
+        if finished:
+            lines.append("")
+            lines.append("Recent (tap for details / restart):")
+            for job in finished:
+                lines.append("• " + _job_brief_line(job))
+    return "\n".join(lines)
+
+
+def _jobs_overview_keyboard(manager, user_id):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    active = manager.list_active_for_user(user_id)
+    rows = []
+    for job in active:
+        label = "{} {} {}".format(job.job_id, job.stay_label or "?", _job_filter_display(job))
+        if len(label) > 60:
+            label = label[:57] + "..."
+        rows.append([InlineKeyboardButton("📌 " + label, callback_data="j:d:{}".format(job.job_id))])
+    if active:
+        rows.append([
+            InlineKeyboardButton("🛑 Cancel all", callback_data="j:ca"),
+            InlineKeyboardButton("🗂 Export all", callback_data="j:xa"),
+        ])
+    rows.append([
+        InlineKeyboardButton("📡 Monitor", callback_data="m:mo"),
+        InlineKeyboardButton("❓ Help", callback_data="m:h"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _job_detail_keyboard(job, manager):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    jid = job.job_id
+    is_active = _job_is_active(job, manager)
+    rows = [
+        [
+            InlineKeyboardButton("📊 Status", callback_data="j:s:{}".format(jid)),
+            InlineKeyboardButton("📋 Export", callback_data="j:x:{}".format(jid)),
+        ],
+    ]
+    row2 = []
+    if is_active:
+        row2.append(InlineKeyboardButton("🛑 Cancel", callback_data="j:c:{}".format(jid)))
+    else:
+        row2.append(InlineKeyboardButton("🔁 Restart", callback_data="j:r:{}".format(jid)))
+    row2.append(InlineKeyboardButton("✏️ Edit", callback_data="j:e:{}".format(jid)))
+    rows.append(row2)
+    rows.append([InlineKeyboardButton("🔙 Jobs", callback_data="j:l")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _sms_field_label(field, rb):
+    if rb.get(field):
+        return "✓"
+    env_key = _TWILIO_ENV.get(field)
+    if env_key and os.getenv(env_key, "").strip():
+        return "env"
+    return "✗"
+
+
+def _args_for_restart_shlex(args):
+    state = _args_to_monitor_state(args)
+    state["twilio_sid"] = ""
+    state["twilio_auth_token"] = ""
+    state["twilio_number"] = ""
+    state["my_phone_number"] = ""
+    return monitor_state_to_shlex_raw(state)
+
+
+def _setup_job_log_context(job):
+    set_job_log_context(
+        park_name=job.park_name,
+        stay_label=job.stay_label,
+        site_filter=job.site_filter,
+        interval_seconds=job.args.interval,
+        interval_jitter_seconds=getattr(job.args, "jitter", 0),
+        job_id=job.job_id,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Telegram UI constants and keyboards
 # ---------------------------------------------------------------------------
 
@@ -262,7 +495,7 @@ def _main_menu_keyboard():
         [InlineKeyboardButton("📡 Monitor", callback_data="m:mo")],
         [
             InlineKeyboardButton("📋 /jobs", callback_data="m:j"),
-            InlineKeyboardButton("🔎 /status", callback_data="m:s"),
+            InlineKeyboardButton("📋 /menu", callback_data="m:menu"),
         ],
         [
             InlineKeyboardButton("🛑 /cancel", callback_data="m:c"),
@@ -275,10 +508,13 @@ def _job_control_keyboard(job_id):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🛑 Cancel", callback_data="j:c:{}".format(job_id)),
             InlineKeyboardButton("📊 Status", callback_data="j:s:{}".format(job_id)),
+            InlineKeyboardButton("🛑 Cancel", callback_data="j:c:{}".format(job_id)),
         ],
-        [InlineKeyboardButton("📋 Jobs", callback_data="j:l")],
+        [
+            InlineKeyboardButton("📋 Export", callback_data="j:x:{}".format(job_id)),
+            InlineKeyboardButton("📋 Jobs", callback_data="j:l"),
+        ],
     ])
 
 
@@ -349,16 +585,14 @@ def _sms_submenu_keyboard(rb):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     sms_on = rb.get("sms", False)
     toggle_label = "📱 SMS: ON" if sms_on else "📱 SMS: off"
-    sid_status = "✓" if rb.get("twilio_sid") else "✗"
-    at_status = "✓" if rb.get("twilio_auth_token") else "✗"
-    tn_status = "✓" if rb.get("twilio_number") else "✗"
-    mpn_status = "✓" if rb.get("my_phone_number") else "✗"
+    if not sms_on and _twilio_env_ready():
+        toggle_label += " (env ready)"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(toggle_label, callback_data="r:s:tog")],
-        [InlineKeyboardButton("Twilio SID [{}]".format(sid_status), callback_data="r:s:sid")],
-        [InlineKeyboardButton("Auth Token [{}]".format(at_status), callback_data="r:s:at")],
-        [InlineKeyboardButton("Twilio Number [{}]".format(tn_status), callback_data="r:s:tn")],
-        [InlineKeyboardButton("Your Phone [{}]".format(mpn_status), callback_data="r:s:mpn")],
+        [InlineKeyboardButton("Twilio SID [{}]".format(_sms_field_label("twilio_sid", rb)), callback_data="r:s:sid")],
+        [InlineKeyboardButton("Auth Token [{}]".format(_sms_field_label("twilio_auth_token", rb)), callback_data="r:s:at")],
+        [InlineKeyboardButton("Twilio Number [{}]".format(_sms_field_label("twilio_number", rb)), callback_data="r:s:tn")],
+        [InlineKeyboardButton("Your Phone [{}]".format(_sms_field_label("my_phone_number", rb)), callback_data="r:s:mpn")],
         [InlineKeyboardButton("🔙 Back", callback_data="r:s:bk")],
     ])
 
@@ -464,12 +698,19 @@ def _run_monitor_job(job, manager, bot, loop):
         _send_telegram_text(bot, loop, job.chat_id, line)
 
     set_log_callback(_tg)
-    park = fetch_park_name(job.args.url)
-    set_telegram_job_meta(job.job_id, job.args.interval, park_name=park,
-                          interval_jitter_seconds=getattr(job.args, "jitter", 0))
+    _setup_job_log_context(job)
     args = job.args
+    _apply_twilio_env_to_args(args)
     client = None
     if args.sms:
+        if not (args.twilio_sid and args.twilio_auth_token and args.twilio_number and args.my_phone_number):
+            _send_telegram_text(bot, loop, job.chat_id,
+                                "❌ SMS enabled but Twilio credentials missing (wizard or env)")
+            manager.mark_done(job.job_id, "error", error="missing_twilio_creds")
+            audit_log("job_aborted", user_id=job.user_id, chat_id=job.chat_id,
+                      job_id=job.job_id, reason="missing_twilio_creds", url=args.url)
+            set_log_callback(None)
+            return
         try:
             from twilio.rest import Client
             client = Client(args.twilio_sid, args.twilio_auth_token)
@@ -481,6 +722,7 @@ def _run_monitor_job(job, manager, bot, loop):
             set_log_callback(None)
             return
 
+    park = job.park_name
     loop_mode = getattr(args, "loop", "continuous")
     try:
         while True:
@@ -490,7 +732,8 @@ def _run_monitor_job(job, manager, bot, loop):
             try:
                 sites = fetch_sites_map(args.url)
             except Exception as e:
-                pp("❌ API poll failed: {}".format(e), telegram_digest=("api_err", str(e)[:220]))
+                pp("❌ API poll failed ({}): {}".format(type(e).__name__, e),
+                   telegram_digest=("api_err", type(e).__name__, str(e)[:200]))
                 if job.stop_event.wait(wait_s):
                     break
                 continue
@@ -549,12 +792,19 @@ def _run_reserve_job(job, manager, bot, loop):
         _send_telegram_text(bot, loop, job.chat_id, line)
 
     set_log_callback(_tg)
-    park = fetch_park_name(job.args.url)
-    set_telegram_job_meta(job.job_id, job.args.interval, park_name=park,
-                          interval_jitter_seconds=getattr(job.args, "jitter", 0))
+    _setup_job_log_context(job)
     args = job.args
+    _apply_twilio_env_to_args(args)
     client = None
     if args.sms:
+        if not (args.twilio_sid and args.twilio_auth_token and args.twilio_number and args.my_phone_number):
+            _send_telegram_text(bot, loop, job.chat_id,
+                                "❌ SMS enabled but Twilio credentials missing (wizard or env)")
+            manager.mark_done(job.job_id, "error", error="missing_twilio_creds")
+            audit_log("job_aborted", user_id=job.user_id, chat_id=job.chat_id,
+                      job_id=job.job_id, reason="missing_twilio_creds", url=args.url)
+            set_log_callback(None)
+            return
         try:
             from twilio.rest import Client
             client = Client(args.twilio_sid, args.twilio_auth_token)
@@ -642,20 +892,20 @@ def telegram_help_text():
         "Campslinger Telegram commands\n\n"
         "/monitor <url> [--f S51,S52] [--i 60] [--jitter 10] [--reserve] "
         "[--loop once|continuous] [--warmode [--warmode-click-delay MS]] [--debug] "
-        "[--sms + Twilio flags]\n"
-        "/jobs                       list your jobs\n"
-        "/status <job_id>            show one job's status\n"
-        "/cancel <job_id>            cancel a running job\n"
-        "/help                       this text + quick-action menu\n\n"
+        "[--sms]\n"
+        "/jobs, /menu              list your jobs (with buttons)\n"
+        "/status <job_id>          show one job's status\n"
+        "/cancel <job_id>          cancel a running job\n"
+        "/cancelall                cancel all your running jobs\n"
+        "/exportall                export /monitor commands for all running jobs\n"
+        "/help                     this text + live job dashboard\n\n"
         "Defaults: API-only monitoring, continuous loop.  --reserve adds Selenium\n"
         "click-Reserve on hit.  --loop once stops after the first hit.  Warmode\n"
         "fires at 07:00 US/Pacific; --warmode-click-delay (ms) waits briefly\n"
         "after the open time to avoid 'Cannot Reserve' rejections.\n\n"
         "Tip: tap 📡 Monitor or send a plain booking URL for defaults.\n"
-        "Works with BC Parks, Ontario Parks, Parks Canada, and other Aspira /\n"
-        "GoingToCamp parks (see /help -> Supported parks in the README).\n\n"
-        "Privacy: Twilio credentials are NEVER written to the audit log; they\n"
-        "live only in the running job's memory.\n"
+        "SMS: toggle --sms in the wizard; Twilio creds can live in server env\n"
+        "(see .env.example).  Credentials are never written to the audit log.\n\n"
         "Operator note: with --rip/--rp set, run the bot with --max-concurrent 1\n"
         "since all jobs share one Chrome session."
     )
@@ -680,6 +930,7 @@ def run_telegram_bot(args):
     )
 
     set_terminal_log_enabled(args.terminal_log)
+    configure_log_timestamps(getattr(args, "log_timestamp", None))
 
     global _REMOTE_CHROME
     rip = (args.remote_ip or "").strip() if args.remote_ip else ""
@@ -754,36 +1005,40 @@ def run_telegram_bot(args):
                       max_concurrent=manager.max_concurrent)
             await _tg_reply(update, "Server busy: max {} concurrent jobs reached.".format(manager.max_concurrent))
             return
+        _populate_job_metadata(job)
+        _apply_twilio_env_to_args(job.args)
         audit_log("job_queued", user_id=job.user_id, chat_id=job.chat_id,
                   job_id=job.job_id, url=job_args.url, job_kind=job_args.job_kind,
                   reserve=bool(job_args.reserve), loop=job_args.loop,
                   warmode=bool(getattr(job_args, "warmode", False)),
                   interval=job_args.interval,
-                  filter=",".join(job_args.filter) if job_args.filter else "")
+                  filter=",".join(job_args.filter) if job_args.filter else "",
+                  park=job.park_name, stay=job.stay_label)
         ev_loop = asyncio.get_running_loop()
         t = threading.Thread(target=_run_job_dispatch, args=(job, manager, app.bot, ev_loop), daemon=True)
         job.thread = t
         t.start()
-        _bot_console_line("Started job {} for user {}".format(job.job_id, uid))
+        _bot_console_line("Started job {} for user {} ({} · {})".format(
+            job.job_id, uid, job.park_name, job.stay_label))
         if job_args.job_kind == "monitor":
             mode = "monitor ({})".format(job_args.loop)
         else:
             mode = "reserve{}".format(" (warmode)" if job_args.warmode else "")
-        await _tg_reply(update, "Started job {}\nkind={}\nmode={}\nfilter={}".format(
-            job.job_id, job_args.job_kind, mode, ",".join(job_args.filter or [])))
+        await _tg_reply(update, "Started job {}\n{} · {} · sites={}\nkind={} mode={}".format(
+            job.job_id, job.park_name, job.stay_label, _job_filter_display(job),
+            job_args.job_kind, mode))
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="Job {} - quick actions while it runs:".format(job.job_id),
+            text="Job {} - quick actions:".format(job.job_id),
             reply_markup=_job_control_keyboard(job.job_id))
 
-    def _format_status_text(jid, requester_user_id):
+    def _status_for_user(jid, requester_user_id):
         job = manager.get_for_user(jid, requester_user_id)
-        if not job:
-            return "Job not found or not yours."
-        return "job={} kind={} status={} started={} ended={} result={} error={}".format(
-            job.job_id, getattr(job.args, "job_kind", "?"),
-            job.status, job.started_at, job.ended_at or "-",
-            job.result_site or "-", job.error or "-")
+        return _format_status_text(job)
+
+    async def _send_jobs_overview(update, user_id, include_recent=True):
+        text = _jobs_overview_text(manager, user_id, include_recent=include_recent)
+        await _tg_reply(update, text, reply_markup=_jobs_overview_keyboard(manager, user_id))
 
     async def help_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -792,9 +1047,9 @@ def run_telegram_bot(args):
         uid = update.effective_user.id if update.effective_user else None
         _bot_console_line("/help user={}".format(uid if uid is not None else "?"))
         audit_log("command_help", user_id=uid, chat_id=update.effective_chat.id if update.effective_chat else None)
-        await _tg_reply(update, telegram_help_text())
-        await context.bot.send_message(chat_id=update.effective_chat.id,
-                                       text="Quick actions (tap a button):", reply_markup=_main_menu_keyboard())
+        overview = _jobs_overview_text(manager, uid, include_recent=False)
+        text = telegram_help_text() + "\n\n---\n" + overview
+        await _tg_reply(update, text, reply_markup=_jobs_overview_keyboard(manager, uid))
 
     async def monitor_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -828,18 +1083,16 @@ def run_telegram_bot(args):
         uid = update.effective_user.id if update.effective_user else None
         _bot_console_line("/jobs user={}".format(uid if uid is not None else "?"))
         audit_log("command_jobs", user_id=uid, chat_id=update.effective_chat.id if update.effective_chat else None)
-        active = manager.list_active_for_user(uid)
-        recent = manager.list_recent_for_user(uid, 10)
-        lines = ["Active jobs: {}".format(len(active))]
-        for job in active:
-            lines.append("- {} kind={} status={} started={}".format(
-                job.job_id, getattr(job.args, "job_kind", "?"), job.status, job.started_at))
-        lines.append("Recent jobs:")
-        for job in recent:
-            lines.append("- {} kind={} status={} result={} error={}".format(
-                job.job_id, getattr(job.args, "job_kind", "?"),
-                job.status, job.result_site or "-", job.error or "-"))
-        await _tg_reply(update, "\n".join(lines))
+        await _send_jobs_overview(update, uid)
+
+    async def menu_cmd(update, context: ContextTypes.DEFAULT_TYPE):
+        if not authorized(update):
+            await reject(update)
+            return
+        uid = update.effective_user.id if update.effective_user else None
+        _bot_console_line("/menu user={}".format(uid if uid is not None else "?"))
+        audit_log("command_menu", user_id=uid, chat_id=update.effective_chat.id if update.effective_chat else None)
+        await _send_jobs_overview(update, uid)
 
     async def status_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -854,7 +1107,7 @@ def run_telegram_bot(args):
         jid = context.args[0].strip()
         job = manager.get_for_user(jid, uid)
         audit_log("command_status", user_id=uid, chat_id=cid, job_id=jid, found=job is not None)
-        await _tg_reply(update, _format_status_text(jid, uid))
+        await _tg_reply(update, _status_for_user(jid, uid))
 
     async def cancel_cmd(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -874,6 +1127,40 @@ def run_telegram_bot(args):
             await _tg_reply(update, "Cancellation requested for {}".format(jid))
         else:
             await _tg_reply(update, "Job {} not active or not yours".format(jid))
+
+    async def cancelall_cmd(update, context: ContextTypes.DEFAULT_TYPE):
+        if not authorized(update):
+            await reject(update)
+            return
+        uid = update.effective_user.id if update.effective_user else None
+        cid = update.effective_chat.id if update.effective_chat else None
+        cancelled = manager.cancel_all_for_user(uid)
+        audit_log("command_cancelall", user_id=uid, chat_id=cid, count=len(cancelled),
+                  job_ids=",".join(cancelled))
+        if cancelled:
+            _bot_console_line("/cancelall {} jobs user={}".format(len(cancelled), uid))
+            await _tg_reply(update, "Cancellation requested for {} job(s):\n{}".format(
+                len(cancelled), ", ".join(cancelled)))
+        else:
+            await _tg_reply(update, "No active jobs to cancel.")
+
+    async def exportall_cmd(update, context: ContextTypes.DEFAULT_TYPE):
+        if not authorized(update):
+            await reject(update)
+            return
+        uid = update.effective_user.id if update.effective_user else None
+        cid = update.effective_chat.id if update.effective_chat else None
+        active = manager.list_active_for_user(uid)
+        audit_log("command_exportall", user_id=uid, chat_id=cid, count=len(active))
+        if not active:
+            await _tg_reply(update, "No active jobs to export.")
+            return
+        lines = [monitor_args_to_command(j.args) for j in active]
+        note = ""
+        if any(j.args.sms for j in active):
+            note = "\n\n(SMS jobs use --sms; Twilio credentials come from server env.)"
+        await _tg_reply(update, "Copy to re-run after reboot:\n\n```\n{}\n```{}".format(
+            "\n".join(lines), note), parse_mode="Markdown")
 
     async def text_handler(update, context: ContextTypes.DEFAULT_TYPE):
         if not authorized(update):
@@ -896,7 +1183,7 @@ def run_telegram_bot(args):
                 context.user_data.pop(UD_PENDING, None)
                 audit_log("command_status", user_id=uid, chat_id=cid, job_id=jid,
                           found=manager.get_for_user(jid, uid) is not None)
-                await _tg_reply(update, _format_status_text(jid, uid))
+                await _tg_reply(update, _status_for_user(jid, uid))
                 return
             context.user_data.pop(UD_PENDING, None)
             ok = manager.cancel_for_user(jid, uid)
@@ -1041,6 +1328,8 @@ def run_telegram_bot(args):
 
         if data == "m:j":
             await ack(); await jobs_cmd(update, context); return
+        if data == "m:menu":
+            await ack(); await menu_cmd(update, context); return
         if data == "m:h":
             await ack(); await help_cmd(update, context); return
         if data == "m:s":
@@ -1070,12 +1359,85 @@ def run_telegram_bot(args):
             await q.message.reply_text(
                 "Cancellation requested for {}".format(jid) if ok else "Job {} not active or not yours".format(jid))
             return
+        if data == "j:ca":
+            await ack()
+            cancelled = manager.cancel_all_for_user(uid)
+            audit_log("command_cancelall", user_id=uid, chat_id=cid, count=len(cancelled),
+                      job_ids=",".join(cancelled))
+            if cancelled:
+                _bot_console_line("/cancelall {} jobs user={}".format(len(cancelled), uid))
+                await q.message.reply_text("Cancellation requested for {} job(s):\n{}".format(
+                    len(cancelled), ", ".join(cancelled)))
+            else:
+                await q.message.reply_text("No active jobs to cancel.")
+            return
+        if data == "j:xa":
+            await ack()
+            active = manager.list_active_for_user(uid)
+            audit_log("command_exportall", user_id=uid, chat_id=cid, count=len(active))
+            if not active:
+                await q.message.reply_text("No active jobs to export.")
+                return
+            lines = [monitor_args_to_command(j.args) for j in active]
+            note = ""
+            if any(j.args.sms for j in active):
+                note = "\n(SMS jobs use --sms; Twilio credentials come from server env.)"
+            await q.message.reply_text("Copy to re-run after reboot:\n\n```\n{}\n```{}".format(
+                "\n".join(lines), note), parse_mode="Markdown")
+            return
+        if data.startswith("j:d:"):
+            await ack()
+            jid = data[4:].strip()
+            job = manager.get_for_user(jid, uid)
+            if not job:
+                await q.message.reply_text("Job {} not found or not yours.".format(jid))
+                return
+            await _edit_or_reply(_format_status_text(job), _job_detail_keyboard(job, manager))
+            return
+        if data.startswith("j:x:"):
+            await ack()
+            jid = data[4:].strip()
+            job = manager.get_for_user(jid, uid)
+            if not job:
+                await q.message.reply_text("Job not found or not yours.")
+                return
+            cmd = monitor_args_to_command(job.args)
+            note = ""
+            if job.args.sms:
+                note = "\n(SMS uses server env credentials.)"
+            await q.message.reply_text("Copy to re-run:\n\n`{}`{}".format(cmd, note), parse_mode="Markdown")
+            return
+        if data.startswith("j:e:"):
+            await ack()
+            jid = data[4:].strip()
+            job = manager.get_for_user(jid, uid)
+            if not job:
+                await q.message.reply_text("Job not found or not yours.")
+                return
+            state = _args_to_monitor_state(job.args)
+            if manager.is_active(jid):
+                state["_replace_job_id"] = jid
+            context.user_data[UD_MONITOR] = state
+            msg = "Edit job {}.\nRun replaces the active job if still running.\n\n{}".format(
+                jid, format_monitor_command_preview(state))
+            await q.message.reply_text(msg, reply_markup=_monitor_more_menu_keyboard(state))
+            return
+        if data.startswith("j:r:"):
+            await ack()
+            jid = data[4:].strip()
+            job = manager.get_for_user(jid, uid)
+            if not job:
+                await q.message.reply_text("Job not found or not yours.")
+                return
+            raw = _args_for_restart_shlex(job.args)
+            await _start_job(update, context, raw)
+            return
         if data.startswith("j:s:"):
             await ack()
             jid = data[4:].strip()
             audit_log("command_status", user_id=uid, chat_id=cid, job_id=jid,
                       found=manager.get_for_user(jid, uid) is not None)
-            await q.message.reply_text(_format_status_text(jid, uid))
+            await q.message.reply_text(_status_for_user(jid, uid))
             return
         if data == "j:l":
             await ack(); await jobs_cmd(update, context); return
@@ -1086,8 +1448,12 @@ def run_telegram_bot(args):
             if not rb:
                 await q.message.reply_text("No URL in progress. Tap 📡 Monitor.")
                 return
+            replace_id = rb.pop("_replace_job_id", None)
             raw = monitor_state_to_shlex_raw(rb)
             _clear_user_flow(context)
+            if replace_id and manager.cancel_for_user(replace_id, uid):
+                _bot_console_line("Replacing job {} user={}".format(replace_id, uid))
+                await q.message.reply_text("Replacing job {}…".format(replace_id))
             await _start_job(update, context, raw)
             return
         if data == "r:m":
@@ -1243,8 +1609,11 @@ def run_telegram_bot(args):
     app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(CommandHandler("monitor", monitor_cmd))
     app.add_handler(CommandHandler("jobs", jobs_cmd))
+    app.add_handler(CommandHandler("menu", menu_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
+    app.add_handler(CommandHandler("cancelall", cancelall_cmd))
+    app.add_handler(CommandHandler("exportall", exportall_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     audit_log("bot_start", max_concurrent=manager.max_concurrent, terminal_log=args.terminal_log,

@@ -284,6 +284,11 @@ Or set the variables directly:
 export TELEGRAM_BOT_TOKEN='…'
 export TELEGRAM_ALLOWED_USER_IDS='11111111,22222222'
 export CAMPSLINGER_AUDIT_LOG='/var/log/campslinger/audit.log'   # optional
+# Optional SMS defaults (toggle SMS per job without wizard entry):
+export CAMPSLINGER_TWILIO_SID='…'
+export CAMPSLINGER_TWILIO_AUTH_TOKEN='…'
+export CAMPSLINGER_TWILIO_NUMBER='+15555550100'
+export CAMPSLINGER_MY_PHONE_NUMBER='+15555550999'
 ```
 
 6. **Start the bot:**
@@ -305,11 +310,14 @@ python3 campslinger_tg.py --rip 192.168.1.50 --rp 9222 --max-concurrent 1
 8. **Optional — register slash commands with BotFather** so they appear in Telegram's `/` menu:
 
 ```text
-help - Bot help and quick-action buttons
+help - Bot help + live job dashboard
 monitor - Start a monitor (optionally with --reserve)
-jobs - List your active and recent jobs
+jobs - List your jobs (with buttons)
+menu - Same as /jobs
 status - Show status for a job id
 cancel - Cancel a running job
+cancelall - Cancel all your running jobs
+exportall - Export /monitor commands for all running jobs
 ```
 
 In BotFather: `/setcommands` → choose your bot → paste the block above.
@@ -344,18 +352,20 @@ WantedBy=multi-user.target
 |---|---|
 | `--max-concurrent N` | Maximum parallel jobs (default `3`). Use `1` with `--rip`/`--rp`. |
 | `--no-terminal-log` | Suppress server-terminal job lines. Telegram output is unchanged. |
+| `--log-timestamp` / `--no-log-timestamp` | Force script timestamps on/off. Default: auto (off under systemd journald). |
 | `--remote_ip` / `--rip` HOST | Chrome remote-debugging host (same LAN). Operator only. Use with `--rp`. |
 | `--remote_port` / `--rp` PORT | Remote-debugging port (e.g. `9222`). |
 
 ### Telegram user guide
 
-- **`/help`** — text help + quick-action menu (📡 Monitor, /jobs, /status, /cancel, /help).
+- **`/help`** — command reference **plus a live dashboard** of your running jobs (tap a job for Status / Cancel / Export / Edit / Restart).
 - **📡 Monitor** wizard:
   1. Paste the booking URL.
   2. **▶️ Go** runs with defaults. **⚙️ More** opens the option menu.
   3. More menu order: **Sites → Interval → Jitter → Reserve → (Warmode → WM delay → Debug if Reserve is on) → Loop → SMS**.
   4. Tap **▶ Run** (equivalent to **▶️ Go**) when ready.
-- **`/jobs`**, **`/status <id>`**, **`/cancel <id>`** — job control. Each user only sees their own jobs.
+- **`/jobs`** or **`/menu`** — job list with inline buttons; **`/cancelall`** / **`/exportall`** for bulk stop or backup before a reboot.
+- **`/status <id>`**, **`/cancel <id>`** — job control. Each user only sees their own jobs.
 - **Plain URL message** — starts a default monitor job (no Reserve).
 - **One-liner** — `/monitor <url> --f S51 --reserve --loop once`.
 
