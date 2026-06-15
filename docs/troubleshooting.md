@@ -14,11 +14,19 @@ The script clicked Reserve a few milliseconds before the park's server crossed 0
 > [!TIP]
 > Don't go above ~1500 ms. The window where Reserve succeeds is short — too much delay risks losing the site to other reservers.
 
+### Setting the warmode timezone
+
+The target zone is configurable per job: `--timezone`/`--tz` on the CLI and `/monitor`, or the **🌐 TZ** button in the wizard (shown when Warmode is on). Default is `US/Pacific`. Invalid zones are now rejected up front with a friendly message (e.g. *"Unknown timezone …"*) instead of silently falling through. Prefetch/open log lines name the actual zone, and long waits emit periodic countdowns.
+
 ### Warmode never fires
 
 - Check the bot/CLI is running with `--reserve` set. Warmode is a sub-mode of reserve; it's a no-op without it.
-- Check the timezone string is a valid IANA zone (e.g. `US/Pacific`, `America/Toronto`). A typo silently falls through to UTC.
+- Check the timezone string is a valid IANA zone (e.g. `US/Pacific`, `America/Toronto`). Invalid zones are rejected at parse time.
 - Check the system clock is correct.
+
+### `pytz` not installed
+
+Warmode requires `pytz`. If it's missing the job/CLI now reports a clear *"missing dependency"* error (it no longer terminates the whole bot process). Fix with `pip install -r requirements.txt`.
 
 ## Selenium / Chrome
 
@@ -49,20 +57,23 @@ The site has been *placed in a hold* (likely yours, from a previous run on the s
 
 ## Telegram bot
 
-### Multi-job dashboard (`/help`, `/jobs`, `/menu`)
+### The menu (`/menu`, `/start`)
 
-`/help` appends a live list of your running jobs with inline buttons. Each job line shows:
+`/menu` is the single hub: it lists your active **and** recent jobs with inline buttons. Each job line shows:
 
-`job_id · park_name · stay_dates · site_filter · status`
+`job_id · kind · park_name · stay_dates · site_filter · status`
 
-Tap a job for **Status**, **Cancel**, **Export**, **Edit**, or **Restart** (restart on finished jobs). Use **Cancel all** / **Export all** for bulk operations, or the `/cancelall` / `/exportall` commands.
+Tap a job for **Status**, **Cancel**, **Export**, **Edit**, or **Restart** (restart on finished jobs). Use **Cancel all** / **Export all** for active jobs, and **Restart recent** / **Export recent** for finished ones. A finished job also posts a Restart / Export / Menu card. The bot advertises only `/menu` in Telegram's `/` list; `/help` is a concise reference and `/jobs` still works.
 
 ### Reboot recovery with `/exportall`
 
-1. Before shutdown, run `/exportall` in Telegram.
+1. Before shutdown, run `/exportall` in Telegram (or tap **Export all** in `/menu`).
 2. Save the code block (one `/monitor …` line per running job).
 3. After the bot restarts, paste each line back into the chat.
 4. If any job used `--sms`, confirm the four `CAMPSLINGER_TWILIO_*` env vars are loaded in systemd — exported lines contain `--sms` only.
+
+> [!NOTE]
+> Running jobs are not auto-persisted across restarts. The optional `CAMPSLINGER_WIZARD_PERSIST=1` setting only restores a **half-built wizard** (tap 📡 Monitor to resume), never a running job or any Twilio secret.
 
 ### "Unauthorized"
 
@@ -98,9 +109,15 @@ Fixed in the docs-overhaul release. Earlier versions imported `_TERMINAL_LOG_ENA
 
 ## SMS / Twilio
 
+### SMS preflight blocks Run
+
+If you toggle SMS on in the wizard but the four Twilio fields aren't all available (from the wizard or `CAMPSLINGER_TWILIO_*` env), tapping **Run** is blocked with a message naming the missing fields. Add them in **More → SMS**, set them in server env, or turn SMS off. The CLI fails fast too: `--sms` without all of `--tsid/--tat/--tn/--mpn` exits with the missing flag names.
+
+Note: in continuous mode SMS is sent only when availability **changes**, so you won't get a text on every poll.
+
 ### SMS enabled but job aborts immediately
 
-The job has `--sms` set but no complete Twilio credential set. Fix one of:
+A job that started with `--sms` but no complete Twilio credential set aborts on launch. Fix one of:
 
 1. **Server env defaults** — set all four in `.env` / systemd `EnvironmentFile=`:
    - `CAMPSLINGER_TWILIO_SID`
@@ -168,9 +185,9 @@ Under systemd, journald adds its own timestamp. The bot auto-detects `JOURNAL_ST
 Example with auto-suppression:
 
 ```text
-Jun 15 02:31:55 campoor python3[139657]: [Kikomun Creek Provincial Park | jun15-jun20 | s51] No availability. Checking again in ~64s
+Jun 15 02:31:55 campoor python3[139657]: [a1b2c3d4 | Kikomun Creek Provincial Park | jun15-jun20 | s51] No availability. Checking again in ~64s
 ```
 
 ### Multiple jobs — can't tell log lines apart
 
-Each poll line includes `[Park | dates | sites]` in the prefix. If two jobs share the same park and dates, distinguish them by site filter or job id in `/jobs`.
+Each poll line now starts with the job id: `[job_id | Park | dates | sites]`. Even if two jobs share the same park, dates, and filter, the leading 8-char job id (matching `/menu` and debug screenshot filenames) disambiguates them.

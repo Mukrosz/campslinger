@@ -4,6 +4,33 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## 2026-06-15 — UX & quality-of-life pass
+
+### Added
+- **`/menu` is the single hub.** `/start` and `/menu` open a dashboard of your active and recent jobs with inline buttons (Status, Cancel, Export, Edit, Restart, Cancel all, Export all). `/help` is now a concise reference; all other commands still work and are reachable from menu buttons. The bot advertises only `/menu` (via `set_my_commands`).
+- **Recent-job buttons** in the menu, plus **Restart recent** and **Export recent** for finished jobs.
+- **End-of-job action card:** when a job finishes (done / reserved / failed / cancelled) the bot posts Restart / Export / Menu buttons.
+- **Plain booking URLs open the wizard** (preview + Go/More) instead of immediately launching with defaults, with a best-effort sample of currently available sites.
+- **Warmode timezone is configurable** end-to-end: `--timezone` / `--tz` (CLI and `/monitor`), a 🌐 TZ wizard button, round-tripped through export/restart. Default remains `US/Pacific`. Invalid zones are rejected with a friendly message.
+- **Wizard draft persistence (opt-in):** `CAMPSLINGER_WIZARD_PERSIST=1` saves an in-progress wizard so it survives a bot restart (tap 📡 Monitor to resume / discard). Secrets are never written to disk. See `.env.example`.
+- **SMS preflight** before running: the wizard blocks Run if SMS is on but Twilio credentials are incomplete (wizard or env).
+- **Job id in the log prefix** (`[<job_id> | Park | dates | sites]`) and in debug screenshot/`mapfail` filenames, so concurrent jobs are unambiguous.
+- **CLI startup banner** summarizing mode, park, stay, interval, filter, loop, timezone, and SMS.
+- **`--drop-pending-updates` / `--keep-pending-updates`** flag on the bot (default: drop).
+- **Auto-reserve** rename in the wizard (formerly "Reserve") to clarify it switches the job to Selenium.
+
+### Changed
+- **Notifications fire on change, not every poll.** In continuous mode both Telegram availability pings and **paid SMS** are sent only when the set of available preferred sites changes (deduped), re-arming when availability drops. Poll lines now include "checking again in ~Ns".
+- **Human-readable `/status`** and richer brief lines (job kind + status emoji).
+- **Structured reserve failure reasons** (`cancelled`, `no_sites_prefetch`, `prep_failed`, `click_failed`) surfaced to the CLI and Telegram.
+- **Shorter parse errors** in chat (point to `/help` instead of dumping it).
+
+### Fixed
+- **Shared remote Chrome:** worker no longer calls `driver.quit()` on a shared remote session (it would kill other jobs), and reserve jobs are serialized with a lock when `--rip`/`--rp` is set; a startup warning fires if `--max-concurrent > 1`.
+- **Warmode no longer `sys.exit`s** the whole process when `pytz` is missing; it raises and the job/CLI reports it. Warmode prefetch/open logs and countdowns now show the actual timezone.
+- **CLI graceful shutdown:** `SIGTERM` (systemd stop) cleanly stops monitor and reserve loops; invalid booking URLs exit with a friendly message; `--sms` without Twilio flags fails fast with the missing flag names.
+- Telegram mirror/send failures are now logged to the server console instead of being silently swallowed.
+
 ## 2026-06-14 — Multi-job UX, logging, Twilio env defaults
 
 ### Added

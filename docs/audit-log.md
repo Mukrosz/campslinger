@@ -20,16 +20,15 @@
 | `job_id` | job-related actions | 8-char hex job id. |
 | `job_kind` | job-related actions | `monitor` or `reserve`. |
 | `url` | job-related actions | Full booking URL (used to filter by park). |
-| `park` | `job_queued` | Resolved park display name. |
-| `stay` | `job_queued` | Stay window label (e.g. `jun15-jun20`). |
-| `reserve` | `job_queued` | Boolean: did the user opt into Reserve? |
+| `stay` | `job_queued` | Stay window label (e.g. `jun15-jun20`). The park name is resolved later (when the worker starts) and is not part of the queue record. |
+| `reserve` | `job_queued` | Boolean: did the user opt into auto-reserve? |
 | `loop` | `job_queued` | `continuous` or `once`. |
 | `warmode` | `job_queued` | Boolean. |
 | `interval` | `job_queued` | Poll interval in seconds. |
 | `filter` | `job_queued` | Comma-separated preferred site labels (lowercased). |
 | `status` | `job_finished` | `done`, `cancelled`, `failed`, `success`, or `error`. |
 | `result_site` | `job_finished` (success) | Reserved site label. |
-| `error` | `job_finished` (error) / `job_aborted` | Truncated error string. |
+| `error` | `job_finished` (error/failed) / `job_aborted` | Truncated error string, or reserve failure reason (`cancelled`, `prep_failed`, `click_failed`, `no_sites_prefetch`, `missing_dependency`). |
 | `reason` | `job_aborted` | Short machine-readable reason (`missing_twilio`, `missing_twilio_creds`, `webdriver_init_failed`). |
 | `accepted` | `command_cancel` | Boolean: did the cancellation succeed? |
 | `found` | `command_status` | Boolean: did the requested job belong to the requester? |
@@ -47,14 +46,17 @@
 |---|---|
 | `bot_start` | Process started; logs configuration. |
 | `unauthorized` | Telegram update from a user not in `TELEGRAM_ALLOWED_USER_IDS`. |
+| `command_start` | `/start` invoked (opens the menu hub). |
 | `command_help` | `/help` invoked. |
 | `command_monitor_usage` | `/monitor` with no arguments (wizard prompt). |
 | `command_jobs` | `/jobs` invoked. |
-| `command_menu` | `/menu` invoked (alias for `/jobs`). |
+| `command_menu` | `/menu` invoked (the primary hub). |
 | `command_status` | `/status` invoked or status callback used. |
 | `command_cancel` | `/cancel` invoked or cancel callback used. |
 | `command_cancelall` | `/cancelall` or **Cancel all** button. |
 | `command_exportall` | `/exportall` or **Export all** button. |
+| `command_export_recent` | **Export recent** button (recent finished jobs). |
+| `command_restart_recent` | **Restart recent** button (re-queues recent finished jobs). |
 | `job_queued` | A new job has been accepted into the JobManager. |
 | `job_rejected_busy` | `--max-concurrent` cap hit. |
 | `job_parse_error` | Malformed `/monitor …` arguments. |
@@ -67,7 +69,7 @@
 
 ```json
 {"ts":"2026-06-15T02:30:00","action":"bot_start","max_concurrent":3,"terminal_log":true,"audit_log_path":"/var/log/campslinger/audit.log"}
-{"ts":"2026-06-15T02:31:00","action":"job_queued","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor","reserve":false,"loop":"continuous","warmode":false,"interval":60,"filter":"s51,s52","park":"Kikomun Creek Provincial Park","stay":"jun15-jun20"}
+{"ts":"2026-06-15T02:31:00","action":"job_queued","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor","reserve":false,"loop":"continuous","warmode":false,"interval":60,"filter":"s51,s52","stay":"jun15-jun20"}
 {"ts":"2026-06-15T02:45:00","action":"command_cancelall","user_id":11111111,"chat_id":11111111,"count":2,"job_ids":"a1b2c3d4,b5c6d7e8"}
 {"ts":"2026-06-15T02:46:00","action":"command_exportall","user_id":11111111,"chat_id":11111111,"count":3}
 {"ts":"2026-06-15T03:10:00","action":"job_finished","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","status":"done","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor"}
@@ -82,8 +84,8 @@ jq -c 'select(.user_id == 11111111)' audit.log
 # Successful reservations only
 jq -c 'select(.action == "job_finished" and .status == "success")' audit.log
 
-# Jobs at a specific park (by display name)
-jq -c 'select(.action == "job_queued" and .park | test("Kikomun"))' audit.log
+# Jobs at a specific park (by booking-URL host)
+jq -c 'select(.action == "job_queued" and (.url // "") | test("bcparks"))' audit.log
 
 # Bulk cancel events
 jq -c 'select(.action == "command_cancelall")' audit.log

@@ -35,9 +35,11 @@ def validate_booking_url(url):
         raise ValueError("Booking URL must use https")
     host = (p.hostname or "").lower()
     if host not in SUPPORTED_PARK_HOSTS:
+        shown = ", ".join(SUPPORTED_PARK_HOSTS[:4])
+        extra = len(SUPPORTED_PARK_HOSTS) - 4
+        supported = "{} and {} more".format(shown, extra) if extra > 0 else shown
         raise ValueError(
-            "Unsupported park host: {}. Supported: {}".format(
-                host, ", ".join(SUPPORTED_PARK_HOSTS)))
+            "Unsupported park host: {}. Supported platforms include: {}".format(host, supported))
     path = p.path or ""
     if not path.startswith(_BOOKING_PATH_PREFIX):
         raise ValueError("Booking URL path must start with {}".format(_BOOKING_PATH_PREFIX))
@@ -87,32 +89,49 @@ def stay_window_label(booking_url):
     return slug if slug != "nostay" else "?"
 
 
+def _debug_artifact_stem(booking_url, park_name, short_tag, file_timestamp=None, job_id=None):
+    ts = file_timestamp or datetime.now().strftime("%Y.%m.%d-%H.%M.%S")
+    slug = _slugify_park_label(park_name)
+    stay = _stay_window_slug(booking_url)
+    tag = re.sub(r"[^a-z0-9]", "", (short_tag or "ss").lower())[:16] or "ss"
+    jid = re.sub(r"[^a-z0-9]", "", (job_id or "").lower())[:12]
+    parts = ["ss", ts, slug, stay]
+    if jid:
+        parts.append(jid)
+    parts.append(tag)
+    return "_".join(parts)
+
+
 def build_debug_screenshot_path(
-    booking_url, park_name, short_tag, directory=None, file_timestamp=None
+    booking_url, park_name, short_tag, directory=None, file_timestamp=None, job_id=None
 ):
     """
     Build a descriptive debug PNG path, e.g.
     ss_2026.04.08-22.03.11_kikomun-creek_jun09-jul14_bcr.png
+    With a job id (concurrent jobs): ss_<time>_<park>_<stay>_<jobid>_bcr.png
 
     short_tag: bcr (before click reserve), acr (after), acs (after click site), mapfail.
     Pass the same file_timestamp for acs/bcr/acr in one attempt so names correlate.
     """
     directory = directory or os.getcwd()
-    ts = file_timestamp or datetime.now().strftime("%Y.%m.%d-%H.%M.%S")
-    slug = _slugify_park_label(park_name)
-    stay = _stay_window_slug(booking_url)
-    tag = re.sub(r"[^a-z0-9]", "", (short_tag or "ss").lower())[:16] or "ss"
-    base = "ss_{}_{}_{}_{}".format(ts, slug, stay, tag)
-    return os.path.join(directory, base + ".png")
+    stem = _debug_artifact_stem(booking_url, park_name, short_tag, file_timestamp, job_id)
+    return os.path.join(directory, stem + ".png")
 
 
-def build_debug_artifact_basename(booking_url, park_name, short_tag, file_timestamp=None):
+def build_debug_artifact_basename(booking_url, park_name, short_tag, file_timestamp=None, job_id=None):
     """Stem (no extension) for paired .html / .png map-failure dumps."""
-    ts = file_timestamp or datetime.now().strftime("%Y.%m.%d-%H.%M.%S")
-    slug = _slugify_park_label(park_name)
-    stay = _stay_window_slug(booking_url)
-    tag = re.sub(r"[^a-z0-9]", "", (short_tag or "ss").lower())[:16] or "ss"
-    return "ss_{}_{}_{}_{}".format(ts, slug, stay, tag)
+    return _debug_artifact_stem(booking_url, park_name, short_tag, file_timestamp, job_id)
+
+
+def availability_digest(labels):
+    """Stable frozenset of normalized site labels for hit-change detection.
+
+    Used to avoid re-notifying (Telegram and SMS) every poll while the set of
+    available preferred sites is unchanged; a change re-arms notification.
+    """
+    return frozenset(
+        (s or "").strip().lower() for s in (labels or []) if (s or "").strip()
+    )
 
 
 def sort_key(s):

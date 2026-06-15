@@ -1,6 +1,11 @@
-"""Reservation loop strategies: normal polling and warmode (timed 07:00 click)."""
+"""Reservation loop strategies: normal polling and warmode (timed 07:00 click).
 
-import sys
+Both entry points return a ``(site, reason)`` tuple:
+  - success:   (site_label, None)
+  - failure:   ("", reason_code)   e.g. "cancelled", "no_sites_prefetch",
+               "prep_failed", "click_failed"
+"""
+
 import time
 from datetime import datetime
 
@@ -10,7 +15,7 @@ from campslinger.core import (
     fetch_sites_map,
     pick_api_target,
 )
-from campslinger.log import pp
+from campslinger.log import current_job_id, pp
 from campslinger.selenium_ops import (
     collect_available_icons_from_map,
     prepare_reservation,
@@ -25,11 +30,12 @@ from campslinger.util import (
 
 def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=10, debug=False, stop_event=None):
     debug_park = fetch_park_name(url) if debug else None
+    jid = current_job_id()
     while True:
         wait_s = randomized_probe_wait_seconds(interval, interval_jitter)
         if stop_event and stop_event.is_set():
             pp("🛑 Cancellation requested")
-            return ""
+            return "", "cancelled"
         try:
             sites = fetch_sites_map(url)
         except Exception as e:
@@ -37,7 +43,7 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
                telegram_digest=("api_err", type(e).__name__, str(e)[:200]))
             if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
-                return ""
+                return "", "cancelled"
             time.sleep(0 if stop_event else wait_s)
             continue
         avail = api_available_labels(sites)
@@ -45,7 +51,7 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
             pp("❌ No availability", telegram_digest=("zero",))
             if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
-                return ""
+                return "", "cancelled"
             time.sleep(0 if stop_event else wait_s)
             continue
         target = pick_api_target(sites, requested_sites)
@@ -60,7 +66,7 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
                     telegram_digest=("no_pick_wait", frozenset(avail)))
             if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
-                return ""
+                return "", "cancelled"
             time.sleep(0 if stop_event else wait_s)
             continue
         pp("✨ Available sites: {}".format(",".join(sorted(avail, key=sort_key))), skip_telegram=True)
@@ -74,12 +80,12 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
                 label, wait_s), telegram_digest=("map_wait", label))
             if stop_event and stop_event.wait(wait_s):
                 pp("🛑 Cancellation requested")
-                return ""
+                return "", "cancelled"
             time.sleep(0 if stop_event else wait_s)
             continue
         site, reserve_button = prepare_reservation(
             driver, on_map, [target], debug=debug, booking_url=url,
-            park_name=debug_park, file_timestamp=file_ts,
+            park_name=debug_park, file_timestamp=file_ts, job_id=jid,
         )
         if site and reserve_button:
             try:
@@ -88,7 +94,7 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
                     debug_screenshot(
                         driver,
                         build_debug_screenshot_path(
-                            url, debug_park, "bcr", file_timestamp=file_ts),
+                            url, debug_park, "bcr", file_timestamp=file_ts, job_id=jid),
                         message="Before clicking reserve",
                     )
                 driver.execute_script("arguments[0].click();", reserve_button)
@@ -98,17 +104,17 @@ def reserve_normal_mode(driver, url, requested_sites, interval, interval_jitter=
                     debug_screenshot(
                         driver,
                         build_debug_screenshot_path(
-                            url, debug_park, "acr", file_timestamp=file_ts),
+                            url, debug_park, "acr", file_timestamp=file_ts, job_id=jid),
                         message="After clicking reserve",
                     )
-                return site
+                return site, None
             except Exception as e:
                 pp("❌ Failed to click reserve button: {}".format(e))
         else:
             pp("❌ Could not prepare reservation", telegram_digest=("prep_fail", label))
         if stop_event and stop_event.wait(wait_s):
             pp("🛑 Cancellation requested")
-            return ""
+            return "", "cancelled"
         time.sleep(0 if stop_event else wait_s)
 
 
@@ -121,28 +127,14 @@ def reserve_war_mode(
     stop_event=None,
     warmode_click_delay_ms=0,
 ):
-    try:
-        import pytz
-        from datetime import timedelta
-    except ImportError:
-        sys.exit("Error: pytz module not found. Install with `pip install pytz`")
+    # Raise (don't sys.exit) so a Telegram worker thread can report the error
+    # without killing the whole bot process.
+    import pytz
+    from datetime import timedelta
 
     from campslinger.selenium_ops import get_available_sites
 
-    def wait_until(target_time):
-        while True:
-            if stop_event and stop_event.is_set():
-                return False
-            now = datetime.now(tz=target_time.tzinfo)
-            if now >= target_time:
-                return True
-            time.sleep(min(0.05, (target_time - now).total_seconds()))
-
-    tz = pytz.timezone(timezone)
-    now = datetime.now(tz)
-    target_time = now.replace(hour=7, minute=0, second=0, microsecond=0)
-    if now >= target_time:
-        target_time += timedelta(days=1)
+    jid = current_job_id()
 
     def fmt_ampm(dt):
         try:
@@ -150,29 +142,63 @@ def reserve_war_mode(
         except ValueError:
             return dt.strftime("%I:%M%p").lstrip("0")
 
-    pp("⚔️  Warmode: prefetch at {} US/Pacific (07:00 window)…".format(
-        fmt_ampm(target_time - timedelta(minutes=1))))
-    if not wait_until(target_time - timedelta(minutes=1)):
+    def _fmt_remaining(seconds):
+        seconds = int(max(0, seconds))
+        h, rem = divmod(seconds, 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            return "{}h {}m".format(h, m)
+        if m:
+            return "{}m {}s".format(m, s)
+        return "{}s".format(s)
+
+    def wait_until(target_time, what):
+        next_countdown = 0.0
+        while True:
+            if stop_event and stop_event.is_set():
+                return False
+            now = datetime.now(tz=target_time.tzinfo)
+            remaining = (target_time - now).total_seconds()
+            if remaining <= 0:
+                return True
+            # Periodic reassurance during long waits (every ~5 min, deduped).
+            if remaining > 90 and time.monotonic() >= next_countdown:
+                pp("⏳ Warmode: {} until {} ({})".format(
+                    _fmt_remaining(remaining), what, fmt_ampm(target_time)),
+                    telegram_digest=("wm_countdown", what, int(remaining // 300)))
+                next_countdown = time.monotonic() + 300
+            time.sleep(min(0.05, remaining))
+
+    tz = pytz.timezone(timezone)
+    now = datetime.now(tz)
+    target_time = now.replace(hour=7, minute=0, second=0, microsecond=0)
+    if now >= target_time:
+        target_time += timedelta(days=1)
+
+    pp("⚔️  Warmode: prefetch at {} {} (07:00 window)…".format(
+        fmt_ampm(target_time - timedelta(minutes=1)), timezone))
+    if not wait_until(target_time - timedelta(minutes=1), "prefetch"):
         pp("🛑 Cancellation requested")
-        return ""
+        return "", "cancelled"
     debug_park = fetch_park_name(url) if debug else None
     file_ts = datetime.now().strftime("%Y.%m.%d-%H.%M.%S") if debug else None
     available_sites = get_available_sites(
         driver, url, debug=debug, stop_event=stop_event, park_name=debug_park)
     if not available_sites:
         pp("❌ No available sites on map at prefetch time")
-        return ""
+        return "", "no_sites_prefetch"
     site, reserve_button = prepare_reservation(
         driver, available_sites, requested_sites, debug=debug,
-        booking_url=url, park_name=debug_park, file_timestamp=file_ts,
+        booking_url=url, park_name=debug_park, file_timestamp=file_ts, job_id=jid,
     )
     if not site or not reserve_button:
         pp("❌ Could not prepare reservation (prefetch)")
-        return ""
-    pp("✅ Prefetch done. Waiting to click Reserve for {} at {}…".format(site, fmt_ampm(target_time)))
-    if not wait_until(target_time):
+        return "", "prep_failed"
+    pp("✅ Prefetch done. Waiting to click Reserve for {} at {} {}…".format(
+        site, fmt_ampm(target_time), timezone))
+    if not wait_until(target_time, "open time"):
         pp("🛑 Cancellation requested")
-        return ""
+        return "", "cancelled"
     delay_ms = max(0, int(warmode_click_delay_ms or 0))
     if delay_ms > 0:
         delay_s = delay_ms / 1000.0
@@ -180,7 +206,7 @@ def reserve_war_mode(
         if stop_event:
             if stop_event.wait(delay_s):
                 pp("🛑 Cancellation requested")
-                return ""
+                return "", "cancelled"
         else:
             time.sleep(delay_s)
     try:
@@ -189,7 +215,7 @@ def reserve_war_mode(
             debug_screenshot(
                 driver,
                 build_debug_screenshot_path(
-                    url, debug_park, "bcr", file_timestamp=file_ts),
+                    url, debug_park, "bcr", file_timestamp=file_ts, job_id=jid),
                 message="Before clicking reserve",
             )
         driver.execute_script("arguments[0].click();", reserve_button)
@@ -199,10 +225,10 @@ def reserve_war_mode(
             debug_screenshot(
                 driver,
                 build_debug_screenshot_path(
-                    url, debug_park, "acr", file_timestamp=file_ts),
+                    url, debug_park, "acr", file_timestamp=file_ts, job_id=jid),
                 message="After clicking reserve",
             )
-        return site
+        return site, None
     except Exception as e:
         pp("❌ Failed to click reserve button at {}: {}".format(fmt_ampm(target_time), e))
-        return ""
+        return "", "click_failed"

@@ -86,11 +86,19 @@ def configure_log_timestamps(log_timestamp=None):
         set_log_timestamp_enabled(False)
 
 
+def current_job_id():
+    """Live read of the per-thread job id (or None).  Safe to call anywhere."""
+    return getattr(_LOGGER_LOCAL, "telegram_job_id", None)
+
+
 def _build_log_prefix():
     parts = []
+    jid = getattr(_LOGGER_LOCAL, "telegram_job_id", None)
     park = getattr(_LOGGER_LOCAL, "park_name", None)
     stay = getattr(_LOGGER_LOCAL, "stay_label", None)
     filt = getattr(_LOGGER_LOCAL, "site_filter", None)
+    if jid:
+        parts.append(jid)
     if park:
         parts.append(park)
     if stay:
@@ -158,12 +166,14 @@ def pp(message, error=False, telegram_digest=None, skip_telegram=False):
                 "no_pick",
                 "no_pick_wait",
                 "map_wait",
+                "api_err",
             ):
                 text += _telegram_poll_footer()
             try:
                 callback(text)
-            except Exception:
-                pass
+            except Exception as e:
+                print("Warning: Telegram mirror failed: {!r}".format(e),
+                      file=sys.stderr, flush=True)
     elif not callback and telegram_digest is not None and not skip_telegram:
         _LOGGER_LOCAL.poll_digest = telegram_digest
     if error:

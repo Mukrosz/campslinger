@@ -18,7 +18,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from webdriver_manager.chrome import ChromeDriverManager
 
 from campslinger.core import API_HEADERS, fetch_park_name
-from campslinger.log import pp
+from campslinger.log import current_job_id, pp
 from campslinger.util import (
     build_debug_artifact_basename,
     build_debug_screenshot_path,
@@ -94,7 +94,7 @@ def _dump_map_load_failure(driver, debug, booking_url=None, park_name=None):
             pname = fetch_park_name(booking_url)
         except Exception:
             pname = None
-    stem = build_debug_artifact_basename(booking_url or "", pname, "mapfail")
+    stem = build_debug_artifact_basename(booking_url or "", pname, "mapfail", job_id=current_job_id())
     html_path = os.path.join(cwd, stem + ".html")
     png_path = os.path.join(cwd, stem + ".png")
     try:

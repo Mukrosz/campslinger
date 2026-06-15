@@ -133,7 +133,9 @@ Force the script timestamp back with `--log-timestamp` on the `ExecStart=` line 
 |------|:---:|-----------|
 | **Monitor** *(default)* | No | Polls the park API for availability. Prints matching sites. |
 | **Reserve** (`--reserve`) | Yes | Same polling, but on hit opens Chrome, finds the site on the map, clicks **Reserve**. |
-| **Warmode** (`--reserve --warmode`) | Yes | No API polling. Prefetches the map at 06:59 US/Pacific, clicks **Reserve** at 07:00 (with optional `--warmode-click-delay`). |
+| **Warmode** (`--reserve --warmode`) | Yes | No API polling. Prefetches the map at 06:59 in `--timezone` (default US/Pacific), clicks **Reserve** at 07:00 (with optional `--warmode-click-delay`). |
+
+On start the CLI prints a one-line banner (mode, park, stay, interval, filter, loop, timezone, SMS). `SIGTERM` (e.g. `systemctl stop`) shuts monitor and reserve loops down cleanly. In continuous monitor mode, SMS is sent only when the set of available preferred sites **changes**, not on every poll, to avoid duplicate paid messages.
 
 ### Monitor → Reserve flow
 
@@ -205,7 +207,7 @@ python3 campslinger.py --url '…' --sms --tsid X --tat X --tn X --mpn X
 | `--warmode-click-delay` / `--wcd` | `0` | Milliseconds to wait **after** 07:00 before clicking Reserve. **Only with `--warmode`.** |
 | `--debug` / `--d` | off | Selenium diagnostics: descriptive screenshots `ss_<ts>_<park>_<stay>_{bcr,acr,acs,mapfail}.png` and map-failure HTML. **No-op without `--reserve`** (a stderr note is emitted). |
 | `--headed` | off | Show Chrome window. **Requires `--reserve`.** |
-| `--timezone` | `US/Pacific` | IANA timezone for warmode. |
+| `--timezone` | `US/Pacific` | IANA timezone for warmode (e.g. `America/Toronto`). |
 | `--remote_ip` / `--rip` | — | Chrome remote-debugging host (your own browser on the LAN). Use with `--rp`. |
 | `--remote_port` / `--rp` | — | Chrome remote-debugging port (e.g. `9222`). |
 | `--sms` / `--s` | off | Send SMS on availability. Requires the Twilio flags below. |
@@ -238,19 +240,22 @@ The URL is validated by `validate_booking_url()` ([campslinger/util.py](campslin
 
 ## 📱 Telegram bot: campslinger_tg.py
 
-Same features as the CLI, controlled from Telegram. **Monitor is the primary action**; Reserve is an opt-in toggle in the wizard. Works with all supported park platforms.
+Same features as the CLI, controlled from Telegram. **`/menu` is the single hub** (jobs + every action as buttons); monitoring is the primary action and Auto-reserve is an opt-in toggle in the wizard. Works with all supported park platforms.
 
 ### Feature matrix
 
 | Feature | Default | How to enable |
 |---|---|---|
-| 📡 **Monitor** | always on | Tap **📡 Monitor** or send `/monitor <url>`. |
-| ⛺ **Reserve** | off | Toggle in More menu, or send `--reserve`. |
+| 📡 **Monitor** | always on | Tap **📡 Monitor** (in `/menu`) or send `/monitor <url>` / a plain booking URL. |
+| ⛺ **Auto-reserve** | off | Toggle in More menu, or send `--reserve`. |
 | 🔄 **Loop** | continuous | More menu, or `--loop once`. |
-| 📱 **SMS / Twilio** | off | Toggle in SMS submenu. If all four `CAMPSLINGER_TWILIO_*` env vars are set on the server, SMS works without entering credentials in the wizard. |
-| 🌅 **Warmode** | off | Visible only when Reserve is on (row below Reserve). |
+| 📱 **SMS / Twilio** | off | Toggle in SMS submenu. If all four `CAMPSLINGER_TWILIO_*` env vars are set on the server, SMS works without entering credentials in the wizard. SMS preflight blocks Run if creds are incomplete. |
+| 🌅 **Warmode** | off | Visible only when Auto-reserve is on (row below it). |
 | ⏱ **WM delay** | `0 ms` | Visible only when Warmode is on; tap to set milliseconds (= `--warmode-click-delay`). |
-| 🐛 **Debug** | off | Visible only when Reserve is on. |
+| 🌐 **Warmode TZ** | `US/Pacific` | Visible only when Warmode is on; tap to set an IANA timezone (= `--timezone`). |
+| 🐛 **Debug** | off | Visible only when Auto-reserve is on. |
+
+In continuous mode, Telegram availability pings and **paid SMS** are sent only when availability **changes** (deduped). When a job finishes (done / reserved / failed / cancelled) the bot posts an action card with Restart / Export / Menu.
 
 ### Bot architecture
 
@@ -276,7 +281,7 @@ sequenceDiagram
             Worker-->>TG: 🎯 Reserved (or ❌)
         end
     else no match
-        Worker-->>TG: 📡 Monitoring again in ~Xs
+        Worker-->>TG: availability summary · checking again in ~Xs
     end
 ```
 
@@ -323,20 +328,17 @@ python3 campslinger_tg.py --rip 192.168.1.50 --rp 9222 --max-concurrent 1
 > [!IMPORTANT]
 > When `--rip`/`--rp` is used, every job shares one Chrome session. Set `--max-concurrent 1` to avoid two jobs fighting over the same browser.
 
-8. **Optional — register slash commands with BotFather** so they appear in Telegram's `/` menu:
+8. **Slash commands** — the bot auto-registers a single discoverable command, **`/menu`**, on startup (via `set_my_commands`). Everything else is reachable from the menu's inline buttons. If you'd rather expose more commands in Telegram's `/` menu, use BotFather `/setcommands` → choose your bot → paste:
 
 ```text
-help - Bot help + live job dashboard
+menu - Open the campslinger menu (jobs + actions)
 monitor - Start a monitor (optionally with --reserve)
-jobs - List your jobs (with buttons)
-menu - Same as /jobs
+help - Command reference
 status - Show status for a job id
 cancel - Cancel a running job
 cancelall - Cancel all your running jobs
 exportall - Export /monitor commands for all running jobs
 ```
-
-In BotFather: `/setcommands` → choose your bot → paste the block above.
 
 9. **Optional — systemd unit:**
 
@@ -373,6 +375,8 @@ WantedBy=multi-user.target
 | `CAMPSLINGER_TWILIO_AUTH_TOKEN` | no | Default Twilio auth token. |
 | `CAMPSLINGER_TWILIO_NUMBER` | no | Default Twilio sending number (E.164). |
 | `CAMPSLINGER_MY_PHONE_NUMBER` | no | Default destination number (E.164). |
+| `CAMPSLINGER_WIZARD_PERSIST` | no | Set to `1` to save in-progress monitor wizards to disk so users can resume after a bot restart. Secrets are never written. |
+| `CAMPSLINGER_WIZARD_DRAFT_DIR` | no | Directory for wizard draft files (default `./campslinger_wizard_drafts`). |
 
 See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinger.py`) does **not** read environment variables — flags only.
 
@@ -382,6 +386,7 @@ See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinge
 |---|---|
 | `--max-concurrent N` | Maximum parallel jobs (default `3`). Use `1` with `--rip`/`--rp`. |
 | `--no-terminal-log` | Suppress server-terminal job lines. Telegram output is unchanged. |
+| `--drop-pending-updates` / `--keep-pending-updates` | Ignore (default) or process Telegram updates queued while the bot was offline. |
 | `--log-timestamp` / `--no-log-timestamp` | Force script timestamps on/off. Default: auto (off under systemd journald). |
 | `--remote_ip` / `--rip` HOST | Chrome remote-debugging host (same LAN). Operator only. Use with `--rp`. |
 | `--remote_port` / `--rp` PORT | Remote-debugging port (e.g. `9222`). |
@@ -392,15 +397,19 @@ See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinge
 
 | Command | Description |
 |---|---|
-| `/help` | Command reference **plus a live dashboard** of your running jobs |
+| `/menu`, `/start` | **The hub** — your active and recent jobs with inline buttons |
 | `/monitor <url> [flags]` | Start a job (or tap **📡 Monitor** for the wizard) |
-| `/jobs`, `/menu` | Same view: active jobs with inline buttons |
+| `/help` | Concise command reference |
+| `/jobs` | Same as `/menu` (kept for habit) |
 | `/status <job_id>` | Full status for one job (park, dates, sites, kind, result) |
 | `/cancel <job_id>` | Cancel one running job |
 | `/cancelall` | Cancel **all** your running jobs |
 | `/exportall` | Export copy-paste `/monitor …` lines for every running job |
 
-#### Per-job actions (buttons on `/help`, `/jobs`, or job detail)
+> [!TIP]
+> You rarely need to type commands: open **`/menu`** and use the buttons. The bot only advertises `/menu` in Telegram's `/` list by default.
+
+#### Per-job actions (buttons in `/menu` or job detail)
 
 | Button | When available | What it does |
 |---|---|---|
@@ -410,21 +419,22 @@ See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinge
 | **Edit** | always | Open the wizard prefilled; **Run** replaces the job if still active |
 | **Restart** | job has finished | Re-queue the same settings as a new job |
 
-Bulk buttons on the job overview: **Cancel all**, **Export all**.
+Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs), plus **Restart recent** and **Export recent** when you have finished jobs. Finishing jobs also post an inline **Restart / Export / Menu** card.
 
 #### Monitor wizard
 
 - **📡 Monitor** wizard:
-  1. Paste the booking URL.
+  1. Paste the booking URL (the bot shows a sample of currently available sites).
   2. **▶️ Go** runs with defaults. **⚙️ More** opens the option menu.
-  3. More menu order: **Sites → Interval → Jitter → Reserve → (Warmode → WM delay → Debug if Reserve is on) → Loop → SMS**.
+  3. More menu order: **Sites → Interval → Jitter → Auto-reserve → (Warmode → WM delay → Warmode TZ → Debug when Auto-reserve is on) → Loop → SMS**.
   4. Tap **▶ Run** (equivalent to **▶️ Go**) when ready.
-- **Plain URL message** — starts a default monitor job (no Reserve).
-- **One-liner** — `/monitor <url> --f S51 --reserve --loop once`.
+- **Plain URL message** — opens the same wizard preview (Go / More) rather than launching blind.
+- **One-liner** — `/monitor <url> --f S51 --reserve --warmode --tz America/Toronto --loop once`.
+- **Draft resume (opt-in)** — with `CAMPSLINGER_WIZARD_PERSIST=1`, an unfinished wizard survives a bot restart; tap **📡 Monitor** to resume (or **🆕 New URL** to discard). Twilio secrets are never saved.
 
 #### Reboot recovery
 
-Before restarting the server, run **`/exportall`** (or tap **Export all** on `/help`). Save the code block. After the bot is back up, paste each `/monitor …` line into Telegram to restore every job. If jobs used `--sms`, ensure the four `CAMPSLINGER_TWILIO_*` env vars are still loaded — exported commands contain `--sms` only, not credentials.
+Before restarting the server, run **`/exportall`** (or tap **Export all** in `/menu`). Save the code block. After the bot is back up, paste each `/monitor …` line into Telegram to restore every job. If jobs used `--sms`, ensure the four `CAMPSLINGER_TWILIO_*` env vars are still loaded — exported commands contain `--sms` only, not credentials. (Running jobs are not auto-persisted; `CAMPSLINGER_WIZARD_PERSIST` only restores half-built wizards.)
 
 ### Audit log
 
@@ -433,18 +443,17 @@ Default path is `./campslinger_telegram_audit.log` (override with `CAMPSLINGER_A
 | Field | Always? | Meaning |
 |---|---|---|
 | `ts` | yes | ISO timestamp (seconds). |
-| `action` | yes | `bot_start`, `command_help`, `command_jobs`, `command_menu`, `command_cancelall`, `command_exportall`, `job_queued`, `job_finished`, … |
+| `action` | yes | `bot_start`, `command_start`, `command_help`, `command_jobs`, `command_menu`, `command_cancelall`, `command_exportall`, `command_export_recent`, `command_restart_recent`, `job_queued`, `job_finished`, … |
 | `user_id` | usually | Telegram numeric user ID. |
 | `chat_id` | usually | Telegram chat ID. |
 | `job_id` | when relevant | 8-char hex job id. |
 | `url` | when relevant | Full booking URL (lookup-friendly). |
-| `park` | `job_queued` | Resolved park display name. |
-| `stay` | `job_queued` | Stay window label (e.g. `jun15-jun20`). |
+| `stay` | `job_queued` | Stay window label (e.g. `jun15-jun20`). The park name is resolved when the worker starts (kept out of the queue record to keep the ack instant). |
 | `job_kind` | when relevant | `monitor` or `reserve`. |
 | `status` | on completion | `done`, `cancelled`, `failed`, `success`, `error`. |
 | `result_site` | on success | Reserved site label. |
-| `error` | on error | Truncated error string. |
-| `count` | bulk commands | Number of jobs affected (`command_cancelall`, `command_exportall`). |
+| `error` | on error / failure | Truncated error string or reserve failure reason (`cancelled`, `prep_failed`, `click_failed`, `no_sites_prefetch`). |
+| `count` | bulk commands | Number of jobs affected (`command_cancelall`, `command_exportall`, `command_export_recent`, `command_restart_recent`). |
 | `job_ids` | `command_cancelall` | Comma-separated ids that received a cancel signal. |
 
 > [!NOTE]
@@ -454,7 +463,7 @@ Default path is `./campslinger_telegram_audit.log` (override with `CAMPSLINGER_A
 <summary>Sample audit-log line</summary>
 
 ```json
-{"ts":"2026-06-15T02:31:00","action":"job_queued","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor","reserve":false,"loop":"continuous","warmode":false,"interval":60,"filter":"s51,s52","park":"Kikomun Creek Provincial Park","stay":"jun15-jun20"}
+{"ts":"2026-06-15T02:31:00","action":"job_queued","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor","reserve":false,"loop":"continuous","warmode":false,"interval":60,"filter":"s51,s52","stay":"jun15-jun20"}
 ```
 
 </details>

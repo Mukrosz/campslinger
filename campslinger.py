@@ -35,9 +35,11 @@ Examples:
 """
 
 import argparse
-import os
+import signal
 import sys
+import threading
 import time
+import uuid
 
 from campslinger.core import (
     api_available_labels,
@@ -49,13 +51,11 @@ from campslinger.log import (
     configure_log_timestamps,
     pp,
     set_job_log_context,
-    set_log_callback,
-    set_terminal_log_enabled,
-    terminal_log_enabled,
 )
 from campslinger.reserve_modes import reserve_normal_mode, reserve_war_mode
 from campslinger.selenium_ops import setup_webdriver, setup_webdriver_remote
 from campslinger.util import (
+    availability_digest,
     comma_separated_list,
     current_time,
     randomized_probe_wait_seconds,
@@ -147,7 +147,10 @@ def build_arg_parser():
 
 
 def _validate_args(args):
-    validate_booking_url(args.url)
+    try:
+        validate_booking_url(args.url)
+    except ValueError as e:
+        sys.exit("Error: {}".format(e))
     if args.warmode and not args.reserve:
         sys.exit("Error: --warmode requires --reserve")
     if args.headed and not args.reserve:
@@ -174,6 +177,16 @@ def _validate_args(args):
 def _setup_twilio(args):
     if not args.sms:
         return None
+    missing = [
+        name for name, val in (
+            ("--tsid", args.twilio_sid),
+            ("--tat", args.twilio_auth_token),
+            ("--tn", args.twilio_number),
+            ("--mpn", args.my_phone_number),
+        ) if not (val or "").strip()
+    ]
+    if missing:
+        sys.exit("Error: --sms requires Twilio flags; missing: {}".format(", ".join(missing)))
     try:
         from twilio.rest import Client
         return Client(args.twilio_sid, args.twilio_auth_token)
@@ -181,44 +194,89 @@ def _setup_twilio(args):
         sys.exit("Error: pip install twilio")
 
 
-def _monitor_loop(args, client):
-    """API-only polling loop (no Selenium)."""
+def _startup_banner(args, park, stay, job_id):
+    if args.reserve and args.warmode:
+        mode = "warmode"
+    elif args.reserve:
+        mode = "reserve"
+    else:
+        mode = "monitor"
+    bits = [
+        "campslinger {}".format(job_id),
+        "mode={}".format(mode),
+        "park={}".format(park or "?"),
+        "stay={}".format(stay),
+        "interval={}s±{}s".format(args.interval, args.jitter),
+        "filter={}".format(",".join(args.filter) if args.filter else "all"),
+        "loop={}".format(args.loop),
+    ]
+    if mode == "warmode":
+        bits.append("tz={}".format(args.timezone))
+        if int(args.warmode_click_delay or 0) > 0:
+            bits.append("wcd={}ms".format(args.warmode_click_delay))
+    if args.sms:
+        bits.append("sms=on")
+    pp("🏕️  " + " | ".join(bits))
+
+
+def _monitor_loop(args, client, park_name=None, stop_event=None):
+    """API-only polling loop (no Selenium).  SMS fires on availability
+    transitions, not every poll, to avoid duplicate paid messages."""
+    last_hit = None
     while True:
+        if stop_event and stop_event.is_set():
+            break
         wait_s = randomized_probe_wait_seconds(args.interval, args.jitter)
         try:
             sites = fetch_sites_map(args.url)
         except Exception as e:
-            pp("❌ API poll failed ({}): {}".format(type(e).__name__, e))
-            time.sleep(wait_s)
+            pp("❌ API poll failed ({}): {}. Retrying in ~{}s".format(
+                type(e).__name__, e, wait_s))
+            if stop_event and stop_event.wait(wait_s):
+                break
+            if not stop_event:
+                time.sleep(wait_s)
             continue
 
         matching = labels_available_matching_filter(sites, args.filter)
         all_avail = api_available_labels(sites)
 
         if matching:
-            pp("✅ Available sites: {}".format(",".join(matching)))
-            if client:
+            once = args.loop == "once"
+            eta = "" if once else " — checking again in ~{}s".format(wait_s)
+            pp("✅ Available sites: {}{}".format(",".join(matching), eta))
+            new_hit = availability_digest(matching)
+            changed = new_hit != last_hit
+            last_hit = new_hit
+            if client and (once or changed):
                 try:
-                    park = getattr(pp, "__self__", None)
-                    body = "{} - Available sites: {}\n{}".format(
-                        current_time(), ",".join(matching), shorten_url(args.url))
+                    prefix = "[{}] ".format(park_name) if park_name else ""
+                    body = "{} - {}Available sites: {}\n{}".format(
+                        current_time(), prefix, ",".join(matching), shorten_url(args.url))
                     send_sms(body, client, args.my_phone_number, args.twilio_number)
                 except Exception as e:
                     pp("❌ SMS failed: {}".format(e))
-            if args.loop == "once":
+            elif client and not changed:
+                pp("SMS skipped (same availability as last hit)", skip_telegram=True)
+            if once:
                 pp("✅ Done (--loop once).")
                 return
         elif not all_avail:
-            pp("No availability")
+            last_hit = None
+            pp("No availability. Checking again in ~{}s".format(wait_s))
         else:
+            last_hit = None
             labels_csv = ",".join(sorted(all_avail, key=sort_key))
             if args.filter:
-                pp("✨ Available: {} | ❌ None of your preferred sites ({}) are free.".format(
-                    labels_csv, ",".join(args.filter)))
+                pp("✨ Available: {} | ❌ None of your preferred sites ({}) are free. Checking again in ~{}s".format(
+                    labels_csv, ",".join(args.filter), wait_s))
             else:
-                pp("✨ Available: {}".format(labels_csv))
+                pp("✨ Available: {}. Checking again in ~{}s".format(labels_csv, wait_s))
 
-        time.sleep(wait_s)
+        if stop_event and stop_event.wait(wait_s):
+            break
+        if not stop_event:
+            time.sleep(wait_s)
 
 
 def main():
@@ -226,18 +284,32 @@ def main():
     configure_log_timestamps(getattr(args, "log_timestamp", None))
     _validate_args(args)
 
+    job_id = uuid.uuid4().hex[:8]
     park = fetch_park_name(args.url)
     stay = stay_window_label(args.url)
     site_filter = ",".join(args.filter) if args.filter else None
     set_job_log_context(
         park_name=park, stay_label=stay, site_filter=site_filter,
         interval_seconds=args.interval, interval_jitter_seconds=args.jitter,
+        job_id=job_id,
     )
     client = _setup_twilio(args)
+    _startup_banner(args, park, stay, job_id)
+
+    stop_event = threading.Event()
+
+    def _handle_term(signum, frame):
+        pp("🛑 Received signal {}; shutting down…".format(signum))
+        stop_event.set()
+
+    try:
+        signal.signal(signal.SIGTERM, _handle_term)
+    except (ValueError, OSError):
+        pass
 
     if not args.reserve:
         try:
-            _monitor_loop(args, client)
+            _monitor_loop(args, client, park_name=park, stop_event=stop_event)
         except KeyboardInterrupt:
             pp("🛑 Interrupted")
         return
@@ -254,16 +326,16 @@ def main():
 
     try:
         if args.warmode:
-            reserved = reserve_war_mode(
+            reserved, reason = reserve_war_mode(
                 driver, args.url, args.filter,
-                timezone=args.timezone, debug=args.debug,
+                timezone=args.timezone, debug=args.debug, stop_event=stop_event,
                 warmode_click_delay_ms=int(args.warmode_click_delay or 0),
             )
         else:
-            reserved = reserve_normal_mode(
+            reserved, reason = reserve_normal_mode(
                 driver, args.url, args.filter,
                 interval=args.interval, interval_jitter=args.jitter,
-                debug=args.debug)
+                debug=args.debug, stop_event=stop_event)
         if reserved:
             pp("🎯 Reserved: {}".format(reserved))
             if client:
@@ -271,7 +343,9 @@ def main():
                     current_time(), reserved, shorten_url(args.url)),
                     client, args.my_phone_number, args.twilio_number)
         else:
-            pp("❌ No reservation was successful")
+            pp("❌ No reservation was successful (reason: {})".format(reason or "unknown"))
+    except ImportError as e:
+        pp("❌ Missing dependency: {}. (warmode needs `pip install pytz`)".format(e))
     except KeyboardInterrupt:
         pp("🛑 Interrupted")
     except Exception as e:
