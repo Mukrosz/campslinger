@@ -35,7 +35,7 @@ campslinger/
 | `selenium_ops.py` | All WebDriver interaction: `setup_webdriver`, `setup_webdriver_remote`, `prepare_reservation`, `get_available_sites`, `_dump_map_load_failure` (failure dumps include the job id). |
 | `util.py` | URL allowlist + validation, `stay_window_label()` for human-friendly date ranges, descriptive screenshot path builder (now job-id aware), `availability_digest()` for notification dedup, comma list / sort helpers, SMS helper. |
 | `wizard_draft.py` | Opt-in (`CAMPSLINGER_WIZARD_PERSIST=1`) save/load/delete of an in-progress monitor wizard per user, so a half-built configuration survives a bot restart. Twilio secrets are stripped before writing; drafts expire after 7 days. |
-| `job_store.py` | Opt-in (`CAMPSLINGER_JOB_PERSIST=1`) persistence of **running** jobs (atomic JSON rewrite) and **finished** jobs (append-only JSONL archive). Twilio secrets are stripped. Used for reboot recovery and the 📂 History UI. |
+| `job_store.py` | Two independent opt-in features: `CAMPSLINGER_JOB_PERSIST=1` persists **running** jobs (atomic JSON rewrite) for reboot recovery; `CAMPSLINGER_JOB_HISTORY=1` archives **finished** jobs (append-only JSONL) for the 📂 History UI. Twilio secrets are stripped from both. |
 
 ## Shared library, thin entrypoints
 
@@ -118,7 +118,12 @@ When `CAMPSLINGER_WIZARD_PERSIST=1`, `_persist_wizard()` saves the in-progress w
 
 ## Job persistence and history
 
-When `CAMPSLINGER_JOB_PERSIST=1`, running jobs survive unexpected reboots and finished jobs are archived for later re-run.
+Two independent features controlled by separate env vars:
+
+- `CAMPSLINGER_JOB_PERSIST=1` — running jobs survive unexpected reboots (active store).
+- `CAMPSLINGER_JOB_HISTORY=1` — finished jobs are archived for browsing and re-run (History UI).
+
+Enable either or both.
 
 ```mermaid
 flowchart LR

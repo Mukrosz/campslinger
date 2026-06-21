@@ -1,16 +1,20 @@
 """Persistent store for active jobs (survives reboot) and finished-job archive.
 
 Active jobs: single JSON file, atomically rewritten on every change.
-Archive: JSONL file (one JSON object per line), append-only.
+  Opt-in via CAMPSLINGER_JOB_PERSIST=1.
 
-Both are opt-in via CAMPSLINGER_JOB_PERSIST=1.  Twilio secrets are never
-written to disk.
+Archive: JSONL file (one JSON object per line), append-only.
+  Opt-in via CAMPSLINGER_JOB_HISTORY=1.
+
+The two features are independent — enable either or both.
+Twilio secrets are never written to disk by either.
 """
 
 import json
 import os
 
 _PERSIST_ENV = "CAMPSLINGER_JOB_PERSIST"
+_HISTORY_ENV = "CAMPSLINGER_JOB_HISTORY"
 _STORE_PATH_ENV = "CAMPSLINGER_JOB_STORE_PATH"
 _ARCHIVE_PATH_ENV = "CAMPSLINGER_JOB_ARCHIVE_PATH"
 _DEFAULT_STORE = "campslinger_active_jobs.json"
@@ -22,6 +26,10 @@ _STORE_VERSION = 1
 
 def persist_enabled():
     return (os.getenv(_PERSIST_ENV) or "").strip().lower() in _TRUTHY
+
+
+def history_enabled():
+    return (os.getenv(_HISTORY_ENV) or "").strip().lower() in _TRUTHY
 
 
 def _store_path():
@@ -123,7 +131,7 @@ def clear_store():
 
 def archive_job(record):
     """Append a finished-job record (dict) to the archive file."""
-    if not persist_enabled():
+    if not history_enabled():
         return
     path = _archive_path()
     try:
@@ -141,6 +149,8 @@ def archive_job(record):
 
 def _load_all_archive():
     """Read all archive lines (oldest first in file)."""
+    if not history_enabled():
+        return []
     path = _archive_path()
     try:
         with open(path, "r", encoding="utf-8") as f:

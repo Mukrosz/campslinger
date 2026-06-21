@@ -254,8 +254,8 @@ Same features as the CLI, controlled from Telegram. **`/menu` is the single hub*
 | ⏱ **WM delay** | `0 ms` | Visible only when Warmode is on; tap to set milliseconds (= `--warmode-click-delay`). |
 | 🌐 **Warmode TZ** | `US/Pacific` | Visible only when Warmode is on; tap to set an IANA timezone (= `--timezone`). |
 | 🐛 **Debug** | off | Visible only when Auto-reserve is on. |
-| 💾 **Job persist** | off | Set `CAMPSLINGER_JOB_PERSIST=1` on the server. Running jobs auto-restore after reboot; finished jobs archived to History. |
-| 📂 **History** | when persist on | Tap **📂 History** in `/menu` — browse past jobs (newest first), Re-run or Edit. |
+| 💾 **Job persist** | off | Set `CAMPSLINGER_JOB_PERSIST=1` on the server. Running jobs auto-restore after reboot. |
+| 📂 **History** | off | Set `CAMPSLINGER_JOB_HISTORY=1` on the server. Finished jobs archived to 📂 History for browsing and re-run. Independent of persist. |
 
 In continuous mode, Telegram availability pings and **paid SMS** are sent only when availability **changes** (deduped). When a job finishes (done / reserved / failed / cancelled) the bot posts an action card with Restart / Export / Menu.
 
@@ -312,8 +312,10 @@ export CAMPSLINGER_TWILIO_SID='…'
 export CAMPSLINGER_TWILIO_AUTH_TOKEN='…'
 export CAMPSLINGER_TWILIO_NUMBER='+15555550100'
 export CAMPSLINGER_MY_PHONE_NUMBER='+15555550999'
-# Optional: persist running jobs + archive finished ones (survive reboots):
+# Optional: persist running jobs across reboots:
 export CAMPSLINGER_JOB_PERSIST=1
+# Optional: archive finished jobs for History (independent of persist):
+export CAMPSLINGER_JOB_HISTORY=1
 # export CAMPSLINGER_JOB_STORE_PATH='/opt/campslinger/campslinger_active_jobs.json'
 # export CAMPSLINGER_JOB_ARCHIVE_PATH='/opt/campslinger/campslinger_job_archive.jsonl'
 # export CAMPSLINGER_MAX_CONCURRENT=3
@@ -384,7 +386,8 @@ WantedBy=multi-user.target
 | `CAMPSLINGER_MY_PHONE_NUMBER` | no | Default destination number (E.164). |
 | `CAMPSLINGER_WIZARD_PERSIST` | no | Set to `1` to save in-progress monitor wizards to disk so users can resume after a bot restart. Secrets are never written. |
 | `CAMPSLINGER_WIZARD_DRAFT_DIR` | no | Directory for wizard draft files (default `./campslinger_wizard_drafts`). |
-| `CAMPSLINGER_JOB_PERSIST` | no | Set to `1` to persist running jobs and archive finished ones. Jobs auto-restore on startup. |
+| `CAMPSLINGER_JOB_PERSIST` | no | Set to `1` to persist running jobs to disk. Jobs auto-restore on startup. |
+| `CAMPSLINGER_JOB_HISTORY` | no | Set to `1` to archive finished jobs (browsable via 📂 History in `/menu`). Independent of persist. |
 | `CAMPSLINGER_JOB_STORE_PATH` | no | Path to active-jobs JSON file (default `./campslinger_active_jobs.json`). |
 | `CAMPSLINGER_JOB_ARCHIVE_PATH` | no | Path to finished-job JSONL archive (default `./campslinger_job_archive.jsonl`). |
 | `CAMPSLINGER_MAX_CONCURRENT` | no | Max concurrent jobs (default 3). `--max-concurrent` flag overrides this. |
@@ -430,7 +433,7 @@ See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinge
 | **Edit** | always | Open the wizard prefilled; **Run** replaces the job if still active |
 | **Restart** | job has finished | Re-queue the same settings as a new job |
 
-Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs), plus **Restart recent** and **Export recent** when you have finished jobs in the current session. **📂 History** (when `CAMPSLINGER_JOB_PERSIST=1`) shows all past jobs from disk — paginated, newest first — with **Re-run** and **Edit** per entry. Finishing jobs also post an inline **Restart / Export / Menu** card.
+Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs), plus **Restart recent** and **Export recent** when you have finished jobs in the current session. **📂 History** (when `CAMPSLINGER_JOB_HISTORY=1`) shows all past jobs from disk — paginated, newest first — with **Re-run** and **Edit** per entry. Finishing jobs also post an inline **Restart / Export / Menu** card.
 
 #### Monitor wizard
 
@@ -453,7 +456,7 @@ In both cases, if jobs used `--sms`, ensure the four `CAMPSLINGER_TWILIO_*` env 
 
 #### Job history
 
-When `CAMPSLINGER_JOB_PERSIST=1`, every finished job is appended to an on-disk archive. Tap **📂 History** in `/menu` to browse past jobs (5 per page, newest first). Each entry offers:
+When `CAMPSLINGER_JOB_HISTORY=1`, every finished job is appended to an on-disk archive. Tap **📂 History** in `/menu` to browse past jobs (5 per page, newest first). Each entry offers:
 
 - **Re-run** — start immediately with the same config.
 - **Edit** — load into the wizard to tweak options before running.
@@ -655,7 +658,7 @@ Either enter all four Twilio fields in the wizard SMS submenu, **or** set all fo
 <details>
 <summary><strong>How do I re-run an old job?</strong></summary>
 
-**With `CAMPSLINGER_JOB_PERSIST=1`:** Open `/menu` → tap **📂 History**. Browse past jobs (newest first), then tap **Re-run** to start immediately or **Edit** to tweak options in the wizard first.
+**With `CAMPSLINGER_JOB_HISTORY=1`:** Open `/menu` → tap **📂 History**. Browse past jobs (newest first), then tap **Re-run** to start immediately or **Edit** to tweak options in the wizard first.
 
 **Without persistence:** Use **Restart recent** or **Export recent** in `/menu` for jobs finished in the current session, or paste a saved `/exportall` line.
 

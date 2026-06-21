@@ -564,11 +564,13 @@ def _jobs_overview_keyboard(manager, user_id):
             InlineKeyboardButton("🔁 Restart recent", callback_data="j:rr"),
             InlineKeyboardButton("🗂 Export recent", callback_data="j:xr"),
         ])
-    rows.append([
+    bottom = [
         InlineKeyboardButton("📡 Monitor", callback_data="m:mo"),
-        InlineKeyboardButton("📂 History", callback_data="h:list:0"),
-        InlineKeyboardButton("❓ Help", callback_data="m:h"),
-    ])
+    ]
+    if job_store.history_enabled():
+        bottom.append(InlineKeyboardButton("📂 History", callback_data="h:list:0"))
+    bottom.append(InlineKeyboardButton("❓ Help", callback_data="m:h"))
+    rows.append(bottom)
     return InlineKeyboardMarkup(rows)
 
 
@@ -2130,10 +2132,15 @@ def run_telegram_bot(args):
     _signal.signal(_signal.SIGTERM, _sigterm_handler)
 
     drop_pending = bool(getattr(args, "drop_pending_updates", True))
+    features = []
+    if job_store.persist_enabled():
+        features.append("job_persist=on")
+    if job_store.history_enabled():
+        features.append("job_history=on")
     _bot_console_line("Telegram bot started (long polling). max_concurrent={} terminal_log={} drop_pending={}{}{}".format(
         manager.max_concurrent, args.terminal_log, drop_pending,
         " remote_chrome={}:{}".format(_REMOTE_CHROME[0], _REMOTE_CHROME[1]) if _REMOTE_CHROME else "",
-        " job_persist=on" if job_store.persist_enabled() else ""))
+        " " + " ".join(features) if features else ""))
     app.run_polling(drop_pending_updates=drop_pending)
 
 

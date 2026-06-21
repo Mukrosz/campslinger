@@ -8,12 +8,12 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ### Added
 - **Running jobs survive reboots (opt-in).** `CAMPSLINGER_JOB_PERSIST=1` persists active job configs to disk; on bot startup they are automatically restored and users are notified. Twilio secrets are never written.
-- **Job history (📂 History button in /menu).** Every finished job is archived to a JSONL file, browsable with pagination (newest first). Each archived job has Re-run and Edit buttons.
+- **Job history (opt-in, independent).** `CAMPSLINGER_JOB_HISTORY=1` archives finished jobs to a JSONL file, browsable via 📂 History in `/menu` (newest first, paginated). Each entry has Re-run and Edit buttons. Enable independently of job persistence.
 - **`CAMPSLINGER_MAX_CONCURRENT` env var.** Sets max concurrent jobs without the `--max-concurrent` CLI flag (flag still overrides).
 - **SIGTERM handler** for the Telegram bot: syncs job store and cancels workers before exit, so `systemctl stop` preserves state.
 
 ### Changed
-- `/menu` bottom row now shows 📡 Monitor, 📂 History, and ❓ Help.
+- `/menu` bottom row shows 📡 Monitor, 📂 History (when `JOB_HISTORY=1`), and ❓ Help.
 
 ### Documentation
 - Updated README, `docs/architecture.md`, `docs/audit-log.md`, and `docs/troubleshooting.md` for job persistence, History UI, reboot recovery, and `CAMPSLINGER_MAX_CONCURRENT`.
