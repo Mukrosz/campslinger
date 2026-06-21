@@ -65,7 +65,16 @@ The site has been *placed in a hold* (likely yours, from a previous run on the s
 
 Tap a job for **Status**, **Cancel**, **Export**, **Edit**, or **Restart** (restart on finished jobs). Use **Cancel all** / **Export all** for active jobs, and **Restart recent** / **Export recent** for finished ones. A finished job also posts a Restart / Export / Menu card. The bot advertises only `/menu` in Telegram's `/` list; `/help` is a concise reference and `/jobs` still works.
 
-### Reboot recovery with `/exportall`
+### Reboot recovery
+
+**Automatic (with `CAMPSLINGER_JOB_PERSIST=1`):**
+
+Jobs are persisted to disk on every start/finish and on SIGTERM. After a reboot, the bot restores them automatically and sends a summary per chat. No manual action needed.
+
+- Active jobs file: `CAMPSLINGER_JOB_STORE_PATH` (default `./campslinger_active_jobs.json`)
+- Archive file: `CAMPSLINGER_JOB_ARCHIVE_PATH` (default `./campslinger_job_archive.jsonl`)
+
+**Manual (with `/exportall`):**
 
 1. Before shutdown, run `/exportall` in Telegram (or tap **Export all** in `/menu`).
 2. Save the code block (one `/monitor …` line per running job).
@@ -73,7 +82,11 @@ Tap a job for **Status**, **Cancel**, **Export**, **Edit**, or **Restart** (rest
 4. If any job used `--sms`, confirm the four `CAMPSLINGER_TWILIO_*` env vars are loaded in systemd — exported lines contain `--sms` only.
 
 > [!NOTE]
-> Running jobs are not auto-persisted across restarts. The optional `CAMPSLINGER_WIZARD_PERSIST=1` setting only restores a **half-built wizard** (tap 📡 Monitor to resume), never a running job or any Twilio secret.
+> Twilio secrets are **never** written to disk by either the active store or the archive. On restore, credentials are loaded from `CAMPSLINGER_TWILIO_*` env vars.
+
+### Job history
+
+Finished jobs are archived automatically when `CAMPSLINGER_JOB_PERSIST=1`. Browse via the **📂 History** button in `/menu` — paginated, newest first. Each entry has **Re-run** (start immediately with same config) and **Edit** (load into wizard to tweak before running).
 
 ### "Unauthorized"
 
@@ -84,7 +97,7 @@ Your numeric Telegram user ID isn't in `TELEGRAM_ALLOWED_USER_IDS`. Use `@userin
 The JobManager cap is full. Either:
 
 - `/cancel <id>` or `/cancelall` to stop running jobs.
-- Restart the bot with a higher `--max-concurrent`.
+- Restart the bot with a higher `--max-concurrent` or set `CAMPSLINGER_MAX_CONCURRENT` in `.env`.
 
 > [!IMPORTANT]
 > If the bot is started with `--rip`/`--rp`, every reserve job shares one Chrome session. Run with `--max-concurrent 1` to avoid two jobs fighting over the same browser.

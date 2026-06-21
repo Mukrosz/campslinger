@@ -63,6 +63,7 @@ from campslinger.util import (
     validate_booking_url,
 )
 from campslinger import wizard_draft
+from campslinger import job_store
 
 _DEFAULT_TIMEZONE = "US/Pacific"
 _remote_chrome_lock = threading.Lock()
@@ -152,6 +153,8 @@ class JobManager:
             job.error = error
             job.ended_at = current_time()
             self.recent.appendleft(job)
+        job_store.archive_job(_job_to_archive_record(job))
+        _sync_active_store(self)
 
     def cancel(self, job_id):
         with self._lock:
@@ -224,11 +227,17 @@ class JobManager:
 # Process-level argparse (host flags only)
 # ---------------------------------------------------------------------------
 
+def _env_max_concurrent():
+    v = os.getenv("CAMPSLINGER_MAX_CONCURRENT", "").strip()
+    return int(v) if v.isdigit() and int(v) > 0 else 3
+
+
 def build_telegram_arg_parser():
     p = argparse.ArgumentParser(
         description="Campslinger Telegram bot: campsite monitoring and optional reservation."
     )
-    p.add_argument("--max-concurrent", type=int, default=3, help="Max concurrent jobs.")
+    p.add_argument("--max-concurrent", type=int, default=_env_max_concurrent(),
+                   help="Max concurrent jobs (env: CAMPSLINGER_MAX_CONCURRENT, default 3).")
     p.add_argument("--no-terminal-log", action="store_false", dest="terminal_log", default=True,
                     help="Do not print job lines to the server terminal.")
     p.add_argument("--rip", "--remote_ip", dest="remote_ip", default=None, metavar="HOST",
@@ -351,6 +360,46 @@ def _args_to_monitor_state(args):
         "twilio_number": args.twilio_number or "",
         "my_phone_number": args.my_phone_number or "",
     }
+
+
+_STORE_SECRET_FIELDS = ("twilio_sid", "twilio_auth_token", "twilio_number", "my_phone_number")
+
+
+def _job_to_store_record(job):
+    """Build a secret-free dict suitable for job_store persistence."""
+    state = {k: v for k, v in _args_to_monitor_state(job.args).items()
+             if k not in _STORE_SECRET_FIELDS}
+    return {
+        "job_id": job.job_id,
+        "user_id": job.user_id,
+        "chat_id": job.chat_id,
+        "queued_at": job.started_at,
+        "state": state,
+    }
+
+
+def _job_to_archive_record(job):
+    """Build a secret-free archive record with outcome fields."""
+    state = {k: v for k, v in _args_to_monitor_state(job.args).items()
+             if k not in _STORE_SECRET_FIELDS}
+    return {
+        "job_id": job.job_id,
+        "user_id": job.user_id,
+        "chat_id": job.chat_id,
+        "queued_at": job.started_at,
+        "ended_at": job.ended_at,
+        "status": job.status,
+        "result_site": job.result_site,
+        "park_name": job.park_name,
+        "stay_label": job.stay_label,
+        "state": state,
+    }
+
+
+def _sync_active_store(manager):
+    """Persist the current active job list to disk (best-effort)."""
+    records = [_job_to_store_record(j) for j in manager.list_active()]
+    job_store.sync_store(records)
 
 
 def monitor_args_to_command(args):
@@ -514,6 +563,7 @@ def _jobs_overview_keyboard(manager, user_id):
         ])
     rows.append([
         InlineKeyboardButton("📡 Monitor", callback_data="m:mo"),
+        InlineKeyboardButton("📂 History", callback_data="h:list:0"),
         InlineKeyboardButton("❓ Help", callback_data="m:h"),
     ])
     return InlineKeyboardMarkup(rows)
@@ -1106,6 +1156,33 @@ async def _tg_reply(update, text, reply_markup=None):
 
 
 # ---------------------------------------------------------------------------
+# Restore helper (starts a job without a Telegram update object)
+# ---------------------------------------------------------------------------
+
+def _start_job_from_record(record, manager, bot, ev_loop):
+    """Start a job from a persisted store record. Returns the JobState or None."""
+    state = record.get("state", {})
+    try:
+        raw = monitor_state_to_shlex_raw(state)
+        job_args = parse_bot_monitor_args(raw)
+    except Exception as e:
+        _bot_console_line("Restore skip (parse error): {!r}".format(e))
+        return None
+    job = manager.create(record.get("chat_id", 0), record.get("user_id", 0), job_args)
+    if not job:
+        _bot_console_line("Restore skip (capacity): {}".format(record.get("job_id", "?")))
+        return None
+    _populate_job_metadata_fast(job)
+    _apply_twilio_env_to_args(job.args)
+    t = threading.Thread(target=_run_job_dispatch, args=(job, manager, bot, ev_loop), daemon=True)
+    job.thread = t
+    t.start()
+    _bot_console_line("Restored job {} for user {} ({})".format(
+        job.job_id, record.get("user_id", "?"), job.stay_label))
+    return job
+
+
+# ---------------------------------------------------------------------------
 # Telegram bot entry
 # ---------------------------------------------------------------------------
 
@@ -1208,6 +1285,7 @@ def run_telegram_bot(args):
         t = threading.Thread(target=_run_job_dispatch, args=(job, manager, app.bot, ev_loop), daemon=True)
         job.thread = t
         t.start()
+        _sync_active_store(manager)
         _bot_console_line("Started job {} for user {} ({})".format(
             job.job_id, uid, job.stay_label))
         if job_args.job_kind == "monitor":
@@ -1657,6 +1735,67 @@ def run_telegram_bot(args):
                     break
                 await _start_job(update, context, _args_for_restart_shlex(j.args))
             return
+        # --- History (archive) callbacks ---
+        if data.startswith("h:list:"):
+            await ack()
+            offset = int(data[7:]) if data[7:].isdigit() else 0
+            page_size = 5
+            entries = job_store.load_archive_for_user(uid, offset=offset, limit=page_size)
+            total = job_store.archive_count_for_user(uid)
+            if not entries:
+                await q.message.reply_text("No job history yet. Finished jobs will appear here.")
+                return
+            page_num = (offset // page_size) + 1
+            lines = ["📂 Job History (page {}, {} total):".format(page_num, total), ""]
+            for e in entries:
+                status_icon = {"success": "✅", "done": "✅", "failed": "❌",
+                               "cancelled": "🛑", "error": "⚠️"}.get(e.get("status"), "•")
+                ended = (e.get("ended_at") or "")[:10]
+                lines.append("{} {} — {} {} ({})".format(
+                    status_icon, e.get("job_id", "?")[:8],
+                    e.get("park_name") or "Unknown",
+                    e.get("stay_label") or "",
+                    ended))
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            rows = []
+            for e in entries:
+                jid = e.get("job_id", "")[:8]
+                rows.append([
+                    InlineKeyboardButton("🔁 Re-run {}".format(jid), callback_data="h:r:{}".format(jid)),
+                    InlineKeyboardButton("✏️ Edit {}".format(jid), callback_data="h:e:{}".format(jid)),
+                ])
+            nav = []
+            if offset > 0:
+                nav.append(InlineKeyboardButton("⏪ Prev", callback_data="h:list:{}".format(max(0, offset - page_size))))
+            if offset + page_size < total:
+                nav.append(InlineKeyboardButton("⏩ Next", callback_data="h:list:{}".format(offset + page_size)))
+            if nav:
+                rows.append(nav)
+            rows.append([InlineKeyboardButton("🔙 Menu", callback_data="j:l")])
+            await q.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(rows))
+            return
+        if data.startswith("h:r:"):
+            await ack()
+            jid = data[4:].strip()
+            rec = job_store.archive_get_by_id(jid)
+            if not rec or rec.get("user_id") != uid:
+                await q.message.reply_text("Archived job not found.")
+                return
+            raw = monitor_state_to_shlex_raw(rec["state"])
+            await _start_job(update, context, raw)
+            return
+        if data.startswith("h:e:"):
+            await ack()
+            jid = data[4:].strip()
+            rec = job_store.archive_get_by_id(jid)
+            if not rec or rec.get("user_id") != uid:
+                await q.message.reply_text("Archived job not found.")
+                return
+            state = dict(rec["state"])
+            context.user_data[UD_MONITOR] = state
+            msg = "Edit archived job {}.\n\n{}".format(jid, format_monitor_command_preview(state))
+            await q.message.reply_text(msg, reply_markup=_monitor_more_menu_keyboard(state))
+            return
         if data.startswith("j:d:"):
             await ack()
             jid = data[4:].strip()
@@ -1928,6 +2067,29 @@ def run_telegram_bot(args):
             ])
         except Exception as e:
             _bot_console_line("Could not set bot commands: {!r}".format(e))
+        # --- Restore persisted jobs ---
+        stored = job_store.load_store()
+        if stored:
+            ev_loop = asyncio.get_running_loop()
+            restored_by_chat = {}
+            for rec in stored:
+                job = _start_job_from_record(rec, manager, application.bot, ev_loop)
+                if job:
+                    restored_by_chat.setdefault(job.chat_id, []).append(job)
+            if restored_by_chat:
+                _sync_active_store(manager)
+                total = sum(len(v) for v in restored_by_chat.values())
+                audit_log("jobs_restored_on_start", count=total,
+                          job_ids=",".join(j.job_id for jobs in restored_by_chat.values() for j in jobs))
+                for chat_id, jobs in restored_by_chat.items():
+                    lines = ["Restored {} job(s) after restart:".format(len(jobs))]
+                    for j in jobs:
+                        lines.append("• {} {} {}".format(j.job_id, j.stay_label or "?", _job_filter_display(j)))
+                    try:
+                        await application.bot.send_message(chat_id=chat_id, text="\n".join(lines))
+                    except Exception:
+                        pass
+                _bot_console_line("Restored {} job(s) from store".format(total))
 
     app.post_init = _post_init
 
@@ -1951,10 +2113,21 @@ def run_telegram_bot(args):
         _bot_console_line(
             "⚠️  Remote Chrome is shared but --max-concurrent={}; reserve jobs are serialized. "
             "Run with --max-concurrent 1 to avoid surprises.".format(manager.max_concurrent))
+    import signal as _signal
+
+    def _sigterm_handler(signum, frame):
+        _bot_console_line("SIGTERM received — syncing store and shutting down…")
+        _sync_active_store(manager)
+        for job in manager.list_active():
+            job.stop_event.set()
+
+    _signal.signal(_signal.SIGTERM, _sigterm_handler)
+
     drop_pending = bool(getattr(args, "drop_pending_updates", True))
-    _bot_console_line("Telegram bot started (long polling). max_concurrent={} terminal_log={} drop_pending={}{}".format(
+    _bot_console_line("Telegram bot started (long polling). max_concurrent={} terminal_log={} drop_pending={}{}{}".format(
         manager.max_concurrent, args.terminal_log, drop_pending,
-        " remote_chrome={}:{}".format(_REMOTE_CHROME[0], _REMOTE_CHROME[1]) if _REMOTE_CHROME else ""))
+        " remote_chrome={}:{}".format(_REMOTE_CHROME[0], _REMOTE_CHROME[1]) if _REMOTE_CHROME else "",
+        " job_persist=on" if job_store.persist_enabled() else ""))
     app.run_polling(drop_pending_updates=drop_pending)
 
 

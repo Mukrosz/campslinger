@@ -377,6 +377,10 @@ WantedBy=multi-user.target
 | `CAMPSLINGER_MY_PHONE_NUMBER` | no | Default destination number (E.164). |
 | `CAMPSLINGER_WIZARD_PERSIST` | no | Set to `1` to save in-progress monitor wizards to disk so users can resume after a bot restart. Secrets are never written. |
 | `CAMPSLINGER_WIZARD_DRAFT_DIR` | no | Directory for wizard draft files (default `./campslinger_wizard_drafts`). |
+| `CAMPSLINGER_JOB_PERSIST` | no | Set to `1` to persist running jobs and archive finished ones. Jobs auto-restore on startup. |
+| `CAMPSLINGER_JOB_STORE_PATH` | no | Path to active-jobs JSON file (default `./campslinger_active_jobs.json`). |
+| `CAMPSLINGER_JOB_ARCHIVE_PATH` | no | Path to finished-job JSONL archive (default `./campslinger_job_archive.jsonl`). |
+| `CAMPSLINGER_MAX_CONCURRENT` | no | Max concurrent jobs (default 3). `--max-concurrent` flag overrides this. |
 
 See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinger.py`) does **not** read environment variables — flags only.
 
@@ -434,7 +438,11 @@ Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs), plus **R
 
 #### Reboot recovery
 
-Before restarting the server, run **`/exportall`** (or tap **Export all** in `/menu`). Save the code block. After the bot is back up, paste each `/monitor …` line into Telegram to restore every job. If jobs used `--sms`, ensure the four `CAMPSLINGER_TWILIO_*` env vars are still loaded — exported commands contain `--sms` only, not credentials. (Running jobs are not auto-persisted; `CAMPSLINGER_WIZARD_PERSIST` only restores half-built wizards.)
+**Automatic (recommended):** Set `CAMPSLINGER_JOB_PERSIST=1` in your `.env`. Running jobs are saved to disk on every start/finish and on `SIGTERM`. After a reboot, the bot automatically restores them and sends a summary in each user's chat. No manual action needed.
+
+**Manual (fallback or if persist is off):** Before restarting, run **`/exportall`** (or tap **Export all** in `/menu`). Save the code block. After the bot is back up, paste each `/monitor …` line into Telegram to restore every job.
+
+In both cases, if jobs used `--sms`, ensure the four `CAMPSLINGER_TWILIO_*` env vars are still loaded — persisted/exported commands never contain credentials.
 
 ### Audit log
 
@@ -622,7 +630,9 @@ Either enter all four Twilio fields in the wizard SMS submenu, **or** set all fo
 <details>
 <summary><strong>How do I restore jobs after a server reboot?</strong></summary>
 
-Before shutdown, run **`/exportall`** in Telegram and save the code block. After the bot restarts, paste each `/monitor …` line back into the chat. SMS jobs need the Twilio env vars loaded again; exported lines contain `--sms` but not secrets.
+**With `CAMPSLINGER_JOB_PERSIST=1`:** Jobs are restored automatically on startup — you'll receive a Telegram summary. No action needed.
+
+**Without persistence:** Before shutdown, run **`/exportall`** and save the code block. After restart, paste each `/monitor …` line back. SMS jobs need the Twilio env vars loaded again.
 
 </details>
 
