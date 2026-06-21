@@ -254,6 +254,8 @@ Same features as the CLI, controlled from Telegram. **`/menu` is the single hub*
 | ⏱ **WM delay** | `0 ms` | Visible only when Warmode is on; tap to set milliseconds (= `--warmode-click-delay`). |
 | 🌐 **Warmode TZ** | `US/Pacific` | Visible only when Warmode is on; tap to set an IANA timezone (= `--timezone`). |
 | 🐛 **Debug** | off | Visible only when Auto-reserve is on. |
+| 💾 **Job persist** | off | Set `CAMPSLINGER_JOB_PERSIST=1` on the server. Running jobs auto-restore after reboot; finished jobs archived to History. |
+| 📂 **History** | when persist on | Tap **📂 History** in `/menu` — browse past jobs (newest first), Re-run or Edit. |
 
 In continuous mode, Telegram availability pings and **paid SMS** are sent only when availability **changes** (deduped). When a job finishes (done / reserved / failed / cancelled) the bot posts an action card with Restart / Export / Menu.
 
@@ -310,6 +312,11 @@ export CAMPSLINGER_TWILIO_SID='…'
 export CAMPSLINGER_TWILIO_AUTH_TOKEN='…'
 export CAMPSLINGER_TWILIO_NUMBER='+15555550100'
 export CAMPSLINGER_MY_PHONE_NUMBER='+15555550999'
+# Optional: persist running jobs + archive finished ones (survive reboots):
+export CAMPSLINGER_JOB_PERSIST=1
+# export CAMPSLINGER_JOB_STORE_PATH='/opt/campslinger/campslinger_active_jobs.json'
+# export CAMPSLINGER_JOB_ARCHIVE_PATH='/opt/campslinger/campslinger_job_archive.jsonl'
+# export CAMPSLINGER_MAX_CONCURRENT=3
 ```
 
 6. **Start the bot:**
@@ -388,7 +395,7 @@ See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinge
 
 | Flag (long / aliases) | Description |
 |---|---|
-| `--max-concurrent N` | Maximum parallel jobs (default `3`). Use `1` with `--rip`/`--rp`. |
+| `--max-concurrent N` | Maximum parallel jobs (default `3`, or `CAMPSLINGER_MAX_CONCURRENT` from `.env`). Use `1` with `--rip`/`--rp`. |
 | `--no-terminal-log` | Suppress server-terminal job lines. Telegram output is unchanged. |
 | `--drop-pending-updates` / `--keep-pending-updates` | Ignore (default) or process Telegram updates queued while the bot was offline. |
 | `--log-timestamp` / `--no-log-timestamp` | Force script timestamps on/off. Default: auto (off under systemd journald). |
@@ -423,7 +430,7 @@ See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinge
 | **Edit** | always | Open the wizard prefilled; **Run** replaces the job if still active |
 | **Restart** | job has finished | Re-queue the same settings as a new job |
 
-Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs), plus **Restart recent** and **Export recent** when you have finished jobs. Finishing jobs also post an inline **Restart / Export / Menu** card.
+Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs), plus **Restart recent** and **Export recent** when you have finished jobs in the current session. **📂 History** (when `CAMPSLINGER_JOB_PERSIST=1`) shows all past jobs from disk — paginated, newest first — with **Re-run** and **Edit** per entry. Finishing jobs also post an inline **Restart / Export / Menu** card.
 
 #### Monitor wizard
 
@@ -444,6 +451,15 @@ Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs), plus **R
 
 In both cases, if jobs used `--sms`, ensure the four `CAMPSLINGER_TWILIO_*` env vars are still loaded — persisted/exported commands never contain credentials.
 
+#### Job history
+
+When `CAMPSLINGER_JOB_PERSIST=1`, every finished job is appended to an on-disk archive. Tap **📂 History** in `/menu` to browse past jobs (5 per page, newest first). Each entry offers:
+
+- **Re-run** — start immediately with the same config.
+- **Edit** — load into the wizard to tweak options before running.
+
+History is unlimited and survives reboots. The in-memory **Recent** section in `/menu` (last few finished jobs this session) is separate and clears on restart.
+
 ### Audit log
 
 Default path is `./campslinger_telegram_audit.log` (override with `CAMPSLINGER_AUDIT_LOG`). One JSON object per line.
@@ -451,7 +467,7 @@ Default path is `./campslinger_telegram_audit.log` (override with `CAMPSLINGER_A
 | Field | Always? | Meaning |
 |---|---|---|
 | `ts` | yes | ISO timestamp (seconds). |
-| `action` | yes | `bot_start`, `command_start`, `command_help`, `command_jobs`, `command_menu`, `command_cancelall`, `command_exportall`, `command_export_recent`, `command_restart_recent`, `job_queued`, `job_finished`, … |
+| `action` | yes | `bot_start`, `command_start`, `command_help`, `command_jobs`, `command_menu`, `command_cancelall`, `command_exportall`, `command_export_recent`, `command_restart_recent`, `job_queued`, `job_finished`, `jobs_restored_on_start`, … |
 | `user_id` | usually | Telegram numeric user ID. |
 | `chat_id` | usually | Telegram chat ID. |
 | `job_id` | when relevant | 8-char hex job id. |
@@ -465,7 +481,7 @@ Default path is `./campslinger_telegram_audit.log` (override with `CAMPSLINGER_A
 | `job_ids` | `command_cancelall` | Comma-separated ids that received a cancel signal. |
 
 > [!NOTE]
-> Twilio credentials are **never** written to the audit log — whether entered in the wizard or loaded from `CAMPSLINGER_TWILIO_*` env vars. Export commands emit `--sms` only.
+> Twilio credentials are **never** written to the audit log, job store, or archive — whether entered in the wizard or loaded from `CAMPSLINGER_TWILIO_*` env vars. Export commands emit `--sms` only.
 
 <details>
 <summary>Sample audit-log line</summary>
@@ -637,6 +653,15 @@ Either enter all four Twilio fields in the wizard SMS submenu, **or** set all fo
 </details>
 
 <details>
+<summary><strong>How do I re-run an old job?</strong></summary>
+
+**With `CAMPSLINGER_JOB_PERSIST=1`:** Open `/menu` → tap **📂 History**. Browse past jobs (newest first), then tap **Re-run** to start immediately or **Edit** to tweak options in the wizard first.
+
+**Without persistence:** Use **Restart recent** or **Export recent** in `/menu` for jobs finished in the current session, or paste a saved `/exportall` line.
+
+</details>
+
+<details>
 <summary><strong>"Unauthorized"</strong></summary>
 
 Your numeric Telegram ID isn't in `TELEGRAM_ALLOWED_USER_IDS`. Use `@userinfobot` to find your ID and add it (comma-separated).
@@ -661,7 +686,7 @@ These will be removed once the new scripts are fully validated.
 
 ## 📚 More docs
 
-- [docs/architecture.md](docs/architecture.md) — package layout, job manager, sequence diagrams.
+- [docs/architecture.md](docs/architecture.md) — package layout, job manager, job persistence, History UI, sequence diagrams.
 - [docs/audit-log.md](docs/audit-log.md) — JSON shape and retention guidance.
 - [docs/troubleshooting.md](docs/troubleshooting.md) — extended troubleshooting recipes.
 - [CHANGELOG.md](CHANGELOG.md) — release history.

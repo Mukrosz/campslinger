@@ -15,7 +15,8 @@ campslinger/
 │   ├── reserve_modes.py      # reserve_normal_mode, reserve_war_mode
 │   ├── selenium_ops.py       # webdriver setup, map navigation, click flows
 │   ├── util.py               # URL validation, screenshot naming, SMS, helpers
-│   └── wizard_draft.py       # optional on-disk persistence of in-progress wizards
+│   ├── wizard_draft.py       # optional on-disk persistence of in-progress wizards
+│   └── job_store.py          # optional active-job store + finished-job archive (JSONL)
 ├── docs/                     # this folder
 ├── _archive/                 # legacy scripts kept for reference
 ├── .env.example              # operator environment template
@@ -34,6 +35,7 @@ campslinger/
 | `selenium_ops.py` | All WebDriver interaction: `setup_webdriver`, `setup_webdriver_remote`, `prepare_reservation`, `get_available_sites`, `_dump_map_load_failure` (failure dumps include the job id). |
 | `util.py` | URL allowlist + validation, `stay_window_label()` for human-friendly date ranges, descriptive screenshot path builder (now job-id aware), `availability_digest()` for notification dedup, comma list / sort helpers, SMS helper. |
 | `wizard_draft.py` | Opt-in (`CAMPSLINGER_WIZARD_PERSIST=1`) save/load/delete of an in-progress monitor wizard per user, so a half-built configuration survives a bot restart. Twilio secrets are stripped before writing; drafts expire after 7 days. |
+| `job_store.py` | Opt-in (`CAMPSLINGER_JOB_PERSIST=1`) persistence of **running** jobs (atomic JSON rewrite) and **finished** jobs (append-only JSONL archive). Twilio secrets are stripped. Used for reboot recovery and the 📂 History UI. |
 
 ## Shared library, thin entrypoints
 
@@ -100,8 +102,11 @@ stateDiagram-v2
 | `j:x:<id>` | export one job | Single `/monitor …` line, no Twilio secrets |
 | `j:e:<id>` | edit | Prefill wizard; Run cancels original if still active |
 | `j:r:<id>` | restart | Re-queue from stored args via `_args_for_restart_shlex()` |
+| `h:list:<offset>` | history page | Paginated archive (5 per page, newest first) from `job_store.load_archive_for_user()` |
+| `h:r:<id>` | history re-run | Start job from archived state via `monitor_state_to_shlex_raw()` |
+| `h:e:<id>` | history edit | Load archived state into wizard (same as `j:e`, without `_replace_job_id`) |
 
-A finished job posts an inline action card (`_job_end_keyboard`: Restart / Export / Menu). The wizard's `r:dd` discards a resumed draft.
+The `/menu` bottom row includes **📂 History** (alongside 📡 Monitor and ❓ Help). A finished job posts an inline action card (`_job_end_keyboard`: Restart / Export / Menu). The wizard's `r:dd` discards a resumed draft.
 
 ## Notification throttling
 
@@ -110,6 +115,41 @@ A finished job posts an inline action card (`_job_end_keyboard`: Restart / Expor
 ## Wizard draft persistence
 
 When `CAMPSLINGER_WIZARD_PERSIST=1`, `_persist_wizard()` saves the in-progress wizard (via `wizard_draft.save_draft`) at each meaningful step and pending-input request; `_drop_wizard_draft()` clears it on Run / cancel / discard. Tapping 📡 Monitor calls `wizard_draft.load_draft()` and offers Go / More / 🆕 New URL. Secrets are stripped before writing and drafts expire after 7 days (`CAMPSLINGER_WIZARD_DRAFT_DIR` overrides the location).
+
+## Job persistence and history
+
+When `CAMPSLINGER_JOB_PERSIST=1`, running jobs survive unexpected reboots and finished jobs are archived for later re-run.
+
+```mermaid
+flowchart LR
+    start["_start_job"] -->|"sync_store(active)"| store["active_jobs.json"]
+    done["mark_done"] -->|"archive_job + sync_store"| store
+    done --> archive["job_archive.jsonl"]
+    boot["post_init"] -->|"load_store + _start_job_from_record"| worker["Job threads"]
+    sigterm["SIGTERM"] -->|"sync_store + stop_event"| store
+```
+
+### Active store
+
+- **File:** `CAMPSLINGER_JOB_STORE_PATH` (default `./campslinger_active_jobs.json`).
+- **Format:** single JSON object with a `jobs` array; rewritten atomically (`.tmp` + `os.replace`) on every job start and finish.
+- **Hooks:** `_sync_active_store(manager)` after `_start_job` accepts a job; `JobManager.mark_done()` archives then syncs.
+- **Restore:** `_post_init` calls `job_store.load_store()`, validates each record via `monitor_state_to_shlex_raw()` → `parse_bot_monitor_args()`, starts worker threads via `_start_job_from_record()`, and sends a per-chat Telegram summary. Audit event: `jobs_restored_on_start`.
+- **Shutdown:** SIGTERM handler syncs the store and sets `stop_event` on all active jobs before exit.
+
+### Archive (History)
+
+- **File:** `CAMPSLINGER_JOB_ARCHIVE_PATH` (default `./campslinger_job_archive.jsonl`).
+- **Format:** one JSON object per line (append-only). Each line includes outcome fields (`status`, `result_site`, `park_name`, `stay_label`) plus a secret-free `state` dict.
+- **Write hook:** `JobManager.mark_done()` calls `job_store.archive_job()`.
+- **Read:** `load_archive_for_user(user_id, offset, limit)` returns newest-first pages; `archive_get_by_id()` powers Re-run / Edit callbacks.
+- **UI:** 📂 History in `/menu`; 5 entries per page with Re-run and Edit buttons.
+
+Twilio credentials are never written to either file. On restore/re-run, `_apply_twilio_env_to_args()` fills them from `CAMPSLINGER_TWILIO_*` at runtime.
+
+### Max concurrent jobs
+
+`CAMPSLINGER_MAX_CONCURRENT` in `.env` sets the default for `--max-concurrent` (default 3). An explicit CLI flag still overrides the env value.
 
 ## Twilio env defaults
 

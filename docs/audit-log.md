@@ -6,7 +6,7 @@
 
 - **Operator visibility.** Every authorization decision, command, and job lifecycle event is recorded.
 - **Forensic-friendly.** Every line is a complete JSON object; you can filter with `jq` without context.
-- **Privacy by construction.** Twilio credentials never reach this file — whether typed in the wizard or loaded from `CAMPSLINGER_TWILIO_*` env vars. Export commands and `/exportall` also omit secrets from Telegram messages.
+- **Privacy by construction.** Twilio credentials never reach this file — whether typed in the wizard or loaded from `CAMPSLINGER_TWILIO_*` env vars. Export commands and `/exportall` also omit secrets from Telegram messages. Job persistence files (`CAMPSLINGER_JOB_STORE_PATH`, `CAMPSLINGER_JOB_ARCHIVE_PATH`) also strip Twilio secrets before writing.
 
 ## Field reference
 
@@ -32,8 +32,8 @@
 | `reason` | `job_aborted` | Short machine-readable reason (`missing_twilio`, `missing_twilio_creds`, `webdriver_init_failed`). |
 | `accepted` | `command_cancel` | Boolean: did the cancellation succeed? |
 | `found` | `command_status` | Boolean: did the requested job belong to the requester? |
-| `count` | bulk commands | Number of jobs affected. |
-| `job_ids` | `command_cancelall` | Comma-separated ids that received a cancel signal. |
+| `count` | bulk commands / restore | Number of jobs affected, or jobs restored on startup (`jobs_restored_on_start`). |
+| `job_ids` | `command_cancelall`, `jobs_restored_on_start` | Comma-separated ids that received a cancel signal, or ids restored after reboot. |
 | `max_concurrent` | `bot_start`, `job_rejected_busy` | Configured concurrency cap. |
 | `terminal_log` | `bot_start` | Whether `--no-terminal-log` was passed. |
 | `remote_chrome` | `bot_start` | `host:port` of the operator's remote Chrome, or absent. |
@@ -62,6 +62,7 @@
 | `job_parse_error` | Malformed `/monitor …` arguments. |
 | `job_aborted` | Job ended before running (missing Twilio module/creds, WebDriver init failure). |
 | `job_finished` | Job ended (any terminal status). |
+| `jobs_restored_on_start` | Bot startup restored one or more jobs from the active store (`CAMPSLINGER_JOB_PERSIST=1`). |
 | `text_message` | Free-text message that wasn't a command, URL, or wizard reply. |
 | `handler_error` | Telegram framework error raised inside a handler. |
 
@@ -72,6 +73,7 @@
 {"ts":"2026-06-15T02:31:00","action":"job_queued","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor","reserve":false,"loop":"continuous","warmode":false,"interval":60,"filter":"s51,s52","stay":"jun15-jun20"}
 {"ts":"2026-06-15T02:45:00","action":"command_cancelall","user_id":11111111,"chat_id":11111111,"count":2,"job_ids":"a1b2c3d4,b5c6d7e8"}
 {"ts":"2026-06-15T02:46:00","action":"command_exportall","user_id":11111111,"chat_id":11111111,"count":3}
+{"ts":"2026-06-21T08:00:00","action":"jobs_restored_on_start","count":2,"job_ids":"a1b2c3d4,b5c6d7e8"}
 {"ts":"2026-06-15T03:10:00","action":"job_finished","user_id":11111111,"chat_id":11111111,"job_id":"a1b2c3d4","status":"done","url":"https://camping.bcparks.ca/create-booking/results?…","job_kind":"monitor"}
 ```
 
@@ -92,6 +94,9 @@ jq -c 'select(.action == "command_cancelall")' audit.log
 
 # Unauthorized attempts in the last 24h
 jq -c 'select(.action == "unauthorized")' audit.log | tail -50
+
+# Jobs restored after a reboot (when CAMPSLINGER_JOB_PERSIST=1)
+jq -c 'select(.action == "jobs_restored_on_start")' audit.log
 
 # Per-user job counts
 jq -r 'select(.action == "job_queued") | .user_id' audit.log | sort | uniq -c | sort -rn
@@ -121,5 +126,6 @@ jq -r 'select(.action == "job_queued") | .user_id' audit.log | sort | uniq -c | 
 - Twilio Account SID, auth token, "from" number, "to" number — never written, including when loaded from env.
 - The Telegram bot token — never written.
 - Exported `/monitor …` command strings from `/exportall` — sent to Telegram chat only, not logged.
+- Job configs in the active store or archive files — separate on-disk files, not mirrored into the audit log.
 - Map screenshots and HTML dumps from `--debug` — saved to disk separately, not into the audit log.
 - Free-text bodies of cancellation prompts and other `text_handler` messages — only a 200-character preview is logged for `text_message` events.

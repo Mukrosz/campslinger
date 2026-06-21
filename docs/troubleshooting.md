@@ -63,7 +63,7 @@ The site has been *placed in a hold* (likely yours, from a previous run on the s
 
 `job_id · kind · park_name · stay_dates · site_filter · status`
 
-Tap a job for **Status**, **Cancel**, **Export**, **Edit**, or **Restart** (restart on finished jobs). Use **Cancel all** / **Export all** for active jobs, and **Restart recent** / **Export recent** for finished ones. A finished job also posts a Restart / Export / Menu card. The bot advertises only `/menu` in Telegram's `/` list; `/help` is a concise reference and `/jobs` still works.
+Tap a job for **Status**, **Cancel**, **Export**, **Edit**, or **Restart** (restart on finished jobs). Use **Cancel all** / **Export all** for active jobs, and **Restart recent** / **Export recent** for finished ones in the current session. Tap **📂 History** (when `CAMPSLINGER_JOB_PERSIST=1`) to browse all archived past jobs from disk — paginated, newest first, with Re-run and Edit. A finished job also posts a Restart / Export / Menu card. The bot advertises only `/menu` in Telegram's `/` list; `/help` is a concise reference and `/jobs` still works.
 
 ### Reboot recovery
 
@@ -87,6 +87,16 @@ Jobs are persisted to disk on every start/finish and on SIGTERM. After a reboot,
 ### Job history
 
 Finished jobs are archived automatically when `CAMPSLINGER_JOB_PERSIST=1`. Browse via the **📂 History** button in `/menu` — paginated, newest first. Each entry has **Re-run** (start immediately with same config) and **Edit** (load into wizard to tweak before running).
+
+> [!TIP]
+> History is separate from the in-memory **Recent** list in `/menu`. Recent shows the last few jobs from the current session only; History persists across reboots.
+
+### Jobs not restored after reboot
+
+1. Confirm `CAMPSLINGER_JOB_PERSIST=1` is in the `.env` loaded by systemd (`EnvironmentFile=`).
+2. Check the bot startup log for `job_persist=on`.
+3. Verify the store file exists and is writable by the service user (default `./campslinger_active_jobs.json`, or your `CAMPSLINGER_JOB_STORE_PATH`). Write failures are logged to stderr.
+4. If the bot was killed without SIGTERM and before the first sync, a job started milliseconds before crash may not be in the file — use `/exportall` before planned maintenance as a backup.
 
 ### "Unauthorized"
 

@@ -15,6 +15,9 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 ### Changed
 - `/menu` bottom row now shows 📡 Monitor, 📂 History, and ❓ Help.
 
+### Documentation
+- Updated README, `docs/architecture.md`, `docs/audit-log.md`, and `docs/troubleshooting.md` for job persistence, History UI, reboot recovery, and `CAMPSLINGER_MAX_CONCURRENT`.
+
 ## 2026-06-15 — UX & quality-of-life pass
 
 ### Added

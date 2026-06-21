@@ -7,9 +7,12 @@ Parks Canada, Manitoba, Nova Scotia, New Brunswick, NL, Yukon, Michigan, Marylan
 Mississippi, Nebraska, and more).
 
 /menu is the single go-to command: it opens a hub with your active and recent jobs
-(each with inline buttons) plus shortcuts to start a monitor or read help.  Everything
-else (/monitor, /status, /cancel, /cancelall, /exportall, /help) still works but is
-reachable from the menu via buttons.
+(each with inline buttons) plus shortcuts to start a monitor, browse job history, or
+read help.  Everything else (/monitor, /status, /cancel, /cancelall, /exportall, /help)
+still works but is reachable from the menu via buttons.
+
+With CAMPSLINGER_JOB_PERSIST=1 (operator env), running jobs survive reboots and
+finished jobs are archived — tap 📂 History in /menu to browse and re-run past jobs.
 
 Primary action is monitoring (API-only polling with notifications).  The "Auto-reserve"
 toggle in the wizard's More menu enables Selenium reservation on hit.  "Loop" controls
@@ -1127,7 +1130,8 @@ def telegram_help_text():
         "Campslinger — /menu is all you need\n\n"
         "Open /menu to see your active and recent jobs, each with buttons:\n"
         "Status · Cancel · Export · Edit · Restart, plus Cancel all / Export all.\n"
-        "Tap 📡 Monitor to start a job (paste a URL), or send a booking URL anytime.\n\n"
+        "Tap 📡 Monitor to start a job (paste a URL), or send a booking URL anytime.\n"
+        "Tap 📂 History (when job persist is enabled) to browse past jobs — Re-run or Edit.\n\n"
         "Power-user one-liner:\n"
         "/monitor <url> [--f S51,S52] [--i 60] [--jitter 10] [--reserve] "
         "[--loop once|continuous] [--warmode [--warmode-click-delay MS] [--timezone TZ]] "
@@ -1141,7 +1145,9 @@ def telegram_help_text():
         "SMS: toggle in the wizard; Twilio creds can live in server env (see\n"
         ".env.example).  In continuous mode SMS is sent on availability changes,\n"
         "not every poll.  Credentials are never written to the audit log.\n\n"
-        "Before a reboot: /exportall, save the lines, paste them back afterwards.\n"
+        "Reboot recovery: with CAMPSLINGER_JOB_PERSIST=1, running jobs restore\n"
+        "automatically on startup.  Otherwise /exportall before shutdown, paste\n"
+        "lines back afterwards.\n"
         "Operator note: with --rip/--rp set, run the bot with --max-concurrent 1\n"
         "since all jobs share one Chrome session."
     )
