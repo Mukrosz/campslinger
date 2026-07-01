@@ -27,6 +27,7 @@ import argparse
 import asyncio
 import json
 import os
+import random
 import shlex
 import sys
 import threading
@@ -233,6 +234,18 @@ class JobManager:
 def _env_max_concurrent():
     v = os.getenv("CAMPSLINGER_MAX_CONCURRENT", "").strip()
     return int(v) if v.isdigit() and int(v) > 0 else 3
+
+
+def _env_restore_stagger():
+    """Return max stagger seconds from CAMPSLINGER_JOB_RESTORE_STAGGER, or 0."""
+    val = os.getenv("CAMPSLINGER_JOB_RESTORE_STAGGER", "").strip()
+    if not val:
+        return 0
+    try:
+        n = float(val)
+        return max(n, 0)
+    except ValueError:
+        return 0
 
 
 def build_telegram_arg_parser():
@@ -2083,7 +2096,12 @@ def run_telegram_bot(args):
         if stored:
             ev_loop = asyncio.get_running_loop()
             restored_by_chat = {}
-            for rec in stored:
+            stagger_max = _env_restore_stagger()
+            for i, rec in enumerate(stored):
+                if i > 0 and stagger_max > 0:
+                    delay = random.uniform(0, stagger_max)
+                    _bot_console_line("Stagger: waiting {:.1f}s before next restore".format(delay))
+                    await asyncio.sleep(delay)
                 job = _start_job_from_record(rec, manager, application.bot, ev_loop)
                 if job:
                     restored_by_chat.setdefault(job.chat_id, []).append(job)

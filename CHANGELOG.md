@@ -4,6 +4,12 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+## 2026-07-01 — SMS stay dates & restore stagger
+
+### Added
+- **Stay dates in SMS.** All SMS notifications (monitor hit + reserve success) now include the search date range (e.g. `[aug03-aug10]`), matching the Telegram format. Reserve-success SMS also now includes the park name.
+- **`CAMPSLINGER_JOB_RESTORE_STAGGER` env var.** When set (e.g. `30`), restored jobs are started with a random [0, N] second delay between each, preventing simultaneous API hits after a reboot.
+
 ## 2026-06-21 — Job persistence & history
 
 ### Added

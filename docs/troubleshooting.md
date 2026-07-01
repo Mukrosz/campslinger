@@ -71,6 +71,8 @@ Tap a job for **Status**, **Cancel**, **Export**, **Edit**, or **Restart** (rest
 
 Jobs are persisted to disk on every start/finish and on SIGTERM. After a reboot, the bot restores them automatically and sends a summary per chat. No manual action needed.
 
+**Stagger (recommended for multiple jobs):** Set `CAMPSLINGER_JOB_RESTORE_STAGGER=30` to add a random delay (0–30 s) between each restored job start. This prevents all jobs from hitting the API simultaneously and risking rate-limits or bans.
+
 - Active jobs file: `CAMPSLINGER_JOB_STORE_PATH` (default `./campslinger_active_jobs.json`)
 - Archive file: `CAMPSLINGER_JOB_ARCHIVE_PATH` (default `./campslinger_job_archive.jsonl`)
 
@@ -97,6 +99,10 @@ Finished jobs are archived automatically when `CAMPSLINGER_JOB_HISTORY=1`. Brows
 2. Check the bot startup log for `job_persist=on`.
 3. Verify the store file exists and is writable by the service user (default `./campslinger_active_jobs.json`, or your `CAMPSLINGER_JOB_STORE_PATH`). Write failures are logged to stderr.
 4. If the bot was killed without SIGTERM and before the first sync, a job started milliseconds before crash may not be in the file — use `/exportall` before planned maintenance as a backup.
+
+### Jobs hitting API simultaneously after reboot
+
+If you see rate-limit errors or suspect the target site is banning you immediately after a reboot, set `CAMPSLINGER_JOB_RESTORE_STAGGER` to a reasonable number of seconds (e.g. `30`). Each restored job will then wait a random delay in [0, N] seconds before starting. The console log shows "Stagger: waiting X.Xs before next restore" between each job.
 
 ### "Unauthorized"
 

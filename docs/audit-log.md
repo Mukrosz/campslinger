@@ -62,7 +62,7 @@
 | `job_parse_error` | Malformed `/monitor …` arguments. |
 | `job_aborted` | Job ended before running (missing Twilio module/creds, WebDriver init failure). |
 | `job_finished` | Job ended (any terminal status). |
-| `jobs_restored_on_start` | Bot startup restored one or more jobs from the active store (`CAMPSLINGER_JOB_PERSIST=1`). |
+| `jobs_restored_on_start` | Bot startup restored one or more jobs from the active store (`CAMPSLINGER_JOB_PERSIST=1`). When `CAMPSLINGER_JOB_RESTORE_STAGGER` is set, restores are spread over random intervals; the audit event is emitted after all jobs have started. |
 | `text_message` | Free-text message that wasn't a command, URL, or wizard reply. |
 | `handler_error` | Telegram framework error raised inside a handler. |
 

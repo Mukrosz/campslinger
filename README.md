@@ -314,6 +314,8 @@ export CAMPSLINGER_TWILIO_NUMBER='+15555550100'
 export CAMPSLINGER_MY_PHONE_NUMBER='+15555550999'
 # Optional: persist running jobs across reboots:
 export CAMPSLINGER_JOB_PERSIST=1
+# Optional: stagger restored jobs (random 0-30s delay between each):
+# export CAMPSLINGER_JOB_RESTORE_STAGGER=30
 # Optional: archive finished jobs for History (independent of persist):
 export CAMPSLINGER_JOB_HISTORY=1
 # export CAMPSLINGER_JOB_STORE_PATH='/opt/campslinger/campslinger_active_jobs.json'
@@ -387,6 +389,7 @@ WantedBy=multi-user.target
 | `CAMPSLINGER_WIZARD_PERSIST` | no | Set to `1` to save in-progress monitor wizards to disk so users can resume after a bot restart. Secrets are never written. |
 | `CAMPSLINGER_WIZARD_DRAFT_DIR` | no | Directory for wizard draft files (default `./campslinger_wizard_drafts`). |
 | `CAMPSLINGER_JOB_PERSIST` | no | Set to `1` to persist running jobs to disk. Jobs auto-restore on startup. |
+| `CAMPSLINGER_JOB_RESTORE_STAGGER` | no | Seconds (e.g. `30`). Each restored job waits a random [0, N] delay before starting — prevents API spam after reboot. Only applies when persist is enabled. |
 | `CAMPSLINGER_JOB_HISTORY` | no | Set to `1` to archive finished jobs (browsable via 📂 History in `/menu`). Independent of persist. |
 | `CAMPSLINGER_JOB_STORE_PATH` | no | Path to active-jobs JSON file (default `./campslinger_active_jobs.json`). |
 | `CAMPSLINGER_JOB_ARCHIVE_PATH` | no | Path to finished-job JSONL archive (default `./campslinger_job_archive.jsonl`). |
@@ -449,6 +452,8 @@ Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs), plus **R
 #### Reboot recovery
 
 **Automatic (recommended):** Set `CAMPSLINGER_JOB_PERSIST=1` in your `.env`. Running jobs are saved to disk on every start/finish and on `SIGTERM`. After a reboot, the bot automatically restores them and sends a summary in each user's chat. No manual action needed.
+
+**Stagger (anti-spam):** Set `CAMPSLINGER_JOB_RESTORE_STAGGER=30` to spread out restored jobs. Each subsequent job waits a random delay in [0, 30] seconds before starting, preventing multiple API hits at once. Unset means no delay.
 
 **Manual (fallback or if persist is off):** Before restarting, run **`/exportall`** (or tap **Export all** in `/menu`). Save the code block. After the bot is back up, paste each `/monitor …` line into Telegram to restore every job.
 
@@ -649,7 +654,7 @@ Either enter all four Twilio fields in the wizard SMS submenu, **or** set all fo
 <details>
 <summary><strong>How do I restore jobs after a server reboot?</strong></summary>
 
-**With `CAMPSLINGER_JOB_PERSIST=1`:** Jobs are restored automatically on startup — you'll receive a Telegram summary. No action needed.
+**With `CAMPSLINGER_JOB_PERSIST=1`:** Jobs are restored automatically on startup — you'll receive a Telegram summary. No action needed. Set `CAMPSLINGER_JOB_RESTORE_STAGGER=30` to spread starts over random intervals and avoid API rate-limiting.
 
 **Without persistence:** Before shutdown, run **`/exportall`** and save the code block. After restart, paste each `/monitor …` line back. SMS jobs need the Twilio env vars loaded again.
 

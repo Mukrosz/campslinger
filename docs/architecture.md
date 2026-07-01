@@ -139,7 +139,7 @@ flowchart LR
 - **File:** `CAMPSLINGER_JOB_STORE_PATH` (default `./campslinger_active_jobs.json`).
 - **Format:** single JSON object with a `jobs` array; rewritten atomically (`.tmp` + `os.replace`) on every job start and finish.
 - **Hooks:** `_sync_active_store(manager)` after `_start_job` accepts a job; `JobManager.mark_done()` archives then syncs.
-- **Restore:** `_post_init` calls `job_store.load_store()`, validates each record via `monitor_state_to_shlex_raw()` → `parse_bot_monitor_args()`, starts worker threads via `_start_job_from_record()`, and sends a per-chat Telegram summary. Audit event: `jobs_restored_on_start`.
+- **Restore:** `_post_init` calls `job_store.load_store()`, validates each record via `monitor_state_to_shlex_raw()` → `parse_bot_monitor_args()`, starts worker threads via `_start_job_from_record()`, and sends a per-chat Telegram summary. When `CAMPSLINGER_JOB_RESTORE_STAGGER` is set (e.g. `30`), an `asyncio.sleep(random.uniform(0, N))` delay is inserted between each job start to avoid simultaneous API hits. Audit event: `jobs_restored_on_start`.
 - **Shutdown:** SIGTERM handler syncs the store and sets `stop_event` on all active jobs before exit.
 
 ### Archive (History)
