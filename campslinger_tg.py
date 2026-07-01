@@ -956,8 +956,9 @@ def _run_monitor_job(job, manager, bot, loop):
                     try:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         prefix = "[{}] ".format(park) if park else ""
-                        body = "{} - {}Available sites: {}\n{}".format(
-                            ts, prefix, ",".join(matching), shorten_url(args.url))
+                        stay = "[{}] ".format(job.stay_label) if job.stay_label else ""
+                        body = "{} - {}{}Available sites: {}\n{}".format(
+                            ts, prefix, stay, ",".join(matching), shorten_url(args.url))
                         send_sms(body, client, args.my_phone_number, args.twilio_number)
                     except Exception as e:
                         pp("❌ SMS failed: {}".format(e), telegram_digest=None)
@@ -1076,8 +1077,10 @@ def _run_reserve_job(job, manager, bot, loop):
             return
         if reserved_site:
             if args.sms and client:
-                send_sms("{} - 🎯 Reserved: {}\n{}".format(
-                    current_time(), reserved_site, shorten_url(args.url)),
+                park_prefix = "[{}] ".format(job.park_name) if job.park_name else ""
+                stay = "[{}] ".format(job.stay_label) if job.stay_label else ""
+                send_sms("{} - {}{}🎯 Reserved: {}\n{}".format(
+                    current_time(), park_prefix, stay, reserved_site, shorten_url(args.url)),
                     client, args.my_phone_number, args.twilio_number)
             manager.mark_done(job.job_id, "success", site=reserved_site)
             _send_telegram_text(bot, loop, job.chat_id,

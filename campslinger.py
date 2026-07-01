@@ -251,8 +251,9 @@ def _monitor_loop(args, client, park_name=None, stop_event=None):
             if client and (once or changed):
                 try:
                     prefix = "[{}] ".format(park_name) if park_name else ""
-                    body = "{} - {}Available sites: {}\n{}".format(
-                        current_time(), prefix, ",".join(matching), shorten_url(args.url))
+                    stay_prefix = "[{}] ".format(stay) if stay else ""
+                    body = "{} - {}{}Available sites: {}\n{}".format(
+                        current_time(), prefix, stay_prefix, ",".join(matching), shorten_url(args.url))
                     send_sms(body, client, args.my_phone_number, args.twilio_number)
                 except Exception as e:
                     pp("❌ SMS failed: {}".format(e))
@@ -339,8 +340,10 @@ def main():
         if reserved:
             pp("🎯 Reserved: {}".format(reserved))
             if client:
-                send_sms("{} - 🎯 Reserved: {}\n{}".format(
-                    current_time(), reserved, shorten_url(args.url)),
+                stay_prefix = "[{}] ".format(stay) if stay else ""
+                park_prefix = "[{}] ".format(park) if park else ""
+                send_sms("{} - {}{}🎯 Reserved: {}\n{}".format(
+                    current_time(), park_prefix, stay_prefix, reserved, shorten_url(args.url)),
                     client, args.my_phone_number, args.twilio_number)
         else:
             pp("❌ No reservation was successful (reason: {})".format(reason or "unknown"))
