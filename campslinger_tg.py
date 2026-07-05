@@ -6,7 +6,7 @@ Works with any park on the Aspira / GoingToCamp platform (BC Parks, Ontario Park
 Parks Canada, Manitoba, Nova Scotia, New Brunswick, NL, Yukon, Michigan, Maryland,
 Mississippi, Nebraska, and more).
 
-/menu is the single go-to command: it opens a hub with your active and recent jobs
+/menu is the single go-to command: it opens a hub with your active jobs
 (each with inline buttons) plus shortcuts to start a monitor, browse job history, or
 read help.  Everything else (/monitor, /status, /cancel, /cancelall, /exportall, /help)
 still works but is reachable from the menu via buttons.
@@ -532,7 +532,7 @@ def _recent_finished_for_user(manager, user_id, count=5):
     return [j for j in manager.list_recent_for_user(user_id, count) if j.job_id not in active_ids]
 
 
-def _jobs_overview_text(manager, user_id, include_recent=True):
+def _jobs_overview_text(manager, user_id):
     active = manager.list_active_for_user(user_id)
     total_active = len(manager.list_active())
     lines = ["Menu — your running jobs ({}, server {}/{}):".format(
@@ -542,13 +542,6 @@ def _jobs_overview_text(manager, user_id, include_recent=True):
             lines.append("• " + _job_brief_line(job))
     else:
         lines.append("No running jobs. Tap 📡 Monitor to start one.")
-    if include_recent:
-        finished = _recent_finished_for_user(manager, user_id, 5)
-        if finished:
-            lines.append("")
-            lines.append("Recent (tap a job for details / restart):")
-            for job in finished:
-                lines.append("• " + _job_brief_line(job))
     return "\n".join(lines)
 
 
@@ -566,23 +559,11 @@ def _jobs_overview_keyboard(manager, user_id):
             InlineKeyboardButton("🛑 Cancel all", callback_data="j:ca"),
             InlineKeyboardButton("🗂 Export all", callback_data="j:xa"),
         ])
-    finished = _recent_finished_for_user(manager, user_id, 5)
-    for job in finished:
-        label = "{} {} {}".format(job.job_id, job.stay_label or "?", _status_label(job.status))
-        if len(label) > 60:
-            label = label[:57] + "..."
-        rows.append([InlineKeyboardButton("↩️ " + label, callback_data="j:d:{}".format(job.job_id))])
-    if finished:
-        rows.append([
-            InlineKeyboardButton("🔁 Restart recent", callback_data="j:rr"),
-            InlineKeyboardButton("🗂 Export recent", callback_data="j:xr"),
-        ])
     bottom = [
         InlineKeyboardButton("📡 Monitor", callback_data="m:mo"),
+        InlineKeyboardButton("📂 History", callback_data="h:list:0"),
+        InlineKeyboardButton("❓ Help", callback_data="m:h"),
     ]
-    if job_store.history_enabled():
-        bottom.append(InlineKeyboardButton("📂 History", callback_data="h:list:0"))
-    bottom.append(InlineKeyboardButton("❓ Help", callback_data="m:h"))
     rows.append(bottom)
     return InlineKeyboardMarkup(rows)
 
@@ -1146,10 +1127,11 @@ def _run_job_dispatch(job, manager, bot, loop):
 def telegram_help_text():
     return (
         "Campslinger — /menu is all you need\n\n"
-        "Open /menu to see your active and recent jobs, each with buttons:\n"
+        "Open /menu to see your active jobs, each with buttons:\n"
         "Status · Cancel · Export · Edit · Restart, plus Cancel all / Export all.\n"
         "Tap 📡 Monitor to start a job (paste a URL), or send a booking URL anytime.\n"
-        "Tap 📂 History (when job persist is enabled) to browse past jobs — Re-run or Edit.\n\n"
+        "Tap 📂 History to browse finished jobs — Re-run or Edit.\n"
+        "Requires CAMPSLINGER_JOB_HISTORY=1 on the server.\n\n"
         "Power-user one-liner:\n"
         "/monitor <url> [--f S51,S52] [--i 60] [--jitter 10] [--reserve] "
         "[--loop once|continuous] [--warmode [--warmode-click-delay MS] [--timezone TZ]] "
@@ -1328,8 +1310,8 @@ def run_telegram_bot(args):
         job = manager.get_for_user(jid, requester_user_id)
         return _format_status_text(job)
 
-    async def _send_jobs_overview(update, user_id, include_recent=True):
-        text = _jobs_overview_text(manager, user_id, include_recent=include_recent)
+    async def _send_jobs_overview(update, user_id):
+        text = _jobs_overview_text(manager, user_id)
         await _tg_reply(update, text, reply_markup=_jobs_overview_keyboard(manager, user_id))
 
     async def help_cmd(update, context: ContextTypes.DEFAULT_TYPE):
@@ -1762,6 +1744,12 @@ def run_telegram_bot(args):
         # --- History (archive) callbacks ---
         if data.startswith("h:list:"):
             await ack()
+            if not job_store.history_enabled():
+                await q.message.reply_text(
+                    "Job history is disabled. Set CAMPSLINGER_JOB_HISTORY=1 in your server "
+                    ".env and restart the bot. Finished jobs are archived there for browsing "
+                    "and re-run.")
+                return
             offset = int(data[7:]) if data[7:].isdigit() else 0
             page_size = 5
             entries = job_store.load_archive_for_user(uid, offset=offset, limit=page_size)

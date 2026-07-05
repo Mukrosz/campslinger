@@ -414,7 +414,7 @@ See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinge
 
 | Command | Description |
 |---|---|
-| `/menu`, `/start` | **The hub** — your active and recent jobs with inline buttons |
+| `/menu`, `/start` | **The hub** — your active jobs with inline buttons |
 | `/monitor <url> [flags]` | Start a job (or tap **📡 Monitor** for the wizard) |
 | `/help` | Concise command reference |
 | `/jobs` | Same as `/menu` (kept for habit) |
@@ -436,7 +436,7 @@ See [.env.example](.env.example) for a copy-paste template. The CLI (`campslinge
 | **Edit** | always | Open the wizard prefilled; **Run** replaces the job if still active |
 | **Restart** | job has finished | Re-queue the same settings as a new job |
 
-Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs), plus **Restart recent** and **Export recent** when you have finished jobs in the current session. **📂 History** (when `CAMPSLINGER_JOB_HISTORY=1`) shows all past jobs from disk — paginated, newest first — with **Re-run** and **Edit** per entry. Finishing jobs also post an inline **Restart / Export / Menu** card.
+Bulk buttons on the menu: **Cancel all**, **Export all** (active jobs). **📂 History** shows all finished jobs from disk — paginated, newest first — with **Re-run** and **Edit** per entry (requires `CAMPSLINGER_JOB_HISTORY=1`). Finishing jobs also post an inline **Restart / Export / Menu** card.
 
 #### Monitor wizard
 
@@ -466,7 +466,7 @@ When `CAMPSLINGER_JOB_HISTORY=1`, every finished job is appended to an on-disk a
 - **Re-run** — start immediately with the same config.
 - **Edit** — load into the wizard to tweak options before running.
 
-History is unlimited and survives reboots. The in-memory **Recent** section in `/menu` (last few finished jobs this session) is separate and clears on restart.
+History is unlimited and survives reboots. The main menu lists **running jobs only**; all finished jobs (done, cancelled, failed, error) live in History.
 
 ### Audit log
 
@@ -665,7 +665,7 @@ Either enter all four Twilio fields in the wizard SMS submenu, **or** set all fo
 
 **With `CAMPSLINGER_JOB_HISTORY=1`:** Open `/menu` → tap **📂 History**. Browse past jobs (newest first), then tap **Re-run** to start immediately or **Edit** to tweak options in the wizard first.
 
-**Without persistence:** Use **Restart recent** or **Export recent** in `/menu` for jobs finished in the current session, or paste a saved `/exportall` line.
+**Without persistence:** Use the **Restart / Export** buttons on a job's completion card, or paste a saved `/exportall` line.
 
 </details>
 

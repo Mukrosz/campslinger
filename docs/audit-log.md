@@ -55,8 +55,8 @@
 | `command_cancel` | `/cancel` invoked or cancel callback used. |
 | `command_cancelall` | `/cancelall` or **Cancel all** button. |
 | `command_exportall` | `/exportall` or **Export all** button. |
-| `command_export_recent` | **Export recent** button (recent finished jobs). |
-| `command_restart_recent` | **Restart recent** button (re-queues recent finished jobs). |
+| `command_export_recent` | **Export recent** button (legacy; no longer shown in menu). |
+| `command_restart_recent` | **Restart recent** button (legacy; no longer shown in menu). |
 | `job_queued` | A new job has been accepted into the JobManager. |
 | `job_rejected_busy` | `--max-concurrent` cap hit. |
 | `job_parse_error` | Malformed `/monitor …` arguments. |

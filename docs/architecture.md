@@ -93,11 +93,11 @@ stateDiagram-v2
 
 | Command / callback | Handler | Purpose |
 |---|---|---|
-| `/menu`, `/start`, `/jobs` | `menu_cmd`, `start_cmd`, `jobs_cmd` | Active + recent overview with buttons |
+| `/menu`, `/start`, `/jobs` | `menu_cmd`, `start_cmd`, `jobs_cmd` | Active jobs overview with buttons |
 | `/help`, `m:h` | `help_cmd` | Concise command reference |
 | `/cancelall`, `j:ca` | `cancelall_cmd` | `cancel_all_for_user()` |
 | `/exportall`, `j:xa` | `exportall_cmd` | `monitor_args_to_command()` per active job |
-| `j:xr` / `j:rr` | export / restart recent | Recent finished jobs (last 5), respecting capacity |
+| `j:xr` / `j:rr` | export / restart recent | Legacy callbacks (no longer in menu; still work on old messages) |
 | `j:d:<id>` | detail view | Status text + `_job_detail_keyboard()` |
 | `j:x:<id>` | export one job | Single `/monitor …` line, no Twilio secrets |
 | `j:e:<id>` | edit | Prefill wizard; Run cancels original if still active |
@@ -106,7 +106,7 @@ stateDiagram-v2
 | `h:r:<id>` | history re-run | Start job from archived state via `monitor_state_to_shlex_raw()` |
 | `h:e:<id>` | history edit | Load archived state into wizard (same as `j:e`, without `_replace_job_id`) |
 
-The `/menu` bottom row includes **📂 History** (alongside 📡 Monitor and ❓ Help). A finished job posts an inline action card (`_job_end_keyboard`: Restart / Export / Menu). The wizard's `r:dd` discards a resumed draft.
+The `/menu` bottom row always includes **📂 History** (alongside 📡 Monitor and ❓ Help). Finished jobs are browsed there when `CAMPSLINGER_JOB_HISTORY=1`; otherwise tapping History shows a setup hint. A finished job posts an inline action card (`_job_end_keyboard`: Restart / Export / Menu). The wizard's `r:dd` discards a resumed draft.
 
 ## Notification throttling
 

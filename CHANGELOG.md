@@ -4,6 +4,9 @@ All notable changes to this project. The format follows [Keep a Changelog](https
 
 ## [Unreleased]
 
+### Changed
+- **Main menu shows active jobs only.** Finished/cancelled jobs are no longer listed in `/menu`; browse them via **History**. The History button is always visible; if `CAMPSLINGER_JOB_HISTORY` is off, tapping it shows a setup hint.
+
 ## 2026-07-01 — SMS stay dates & restore stagger
 
 ### Added
