@@ -568,12 +568,22 @@ def _jobs_overview_keyboard(manager, user_id):
     return InlineKeyboardMarkup(rows)
 
 
-def _job_end_keyboard(job_id, can_restart=True):
+def _job_end_keyboard(job_id, can_restart=True, url=None):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    rows = []
+    if url:
+        rows.append([InlineKeyboardButton("🔗 Book Now", url=url)])
     row = [InlineKeyboardButton("📋 Export", callback_data="j:x:{}".format(job_id))]
     if can_restart:
         row.insert(0, InlineKeyboardButton("🔁 Restart", callback_data="j:r:{}".format(job_id)))
-    return InlineKeyboardMarkup([row, [InlineKeyboardButton("📋 Menu", callback_data="j:l")]])
+    rows.append(row)
+    rows.append([InlineKeyboardButton("📋 Menu", callback_data="j:l")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _book_now_keyboard(url):
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔗 Book Now", url=url)]])
 
 
 def _job_detail_keyboard(job, manager):
@@ -941,10 +951,17 @@ def _run_monitor_job(job, manager, bot, loop):
                 changed = new_hit != last_hit
                 last_hit = new_hit
                 if loop_mode == "once":
-                    pp("✅ Available sites: {}".format(",".join(matching)), telegram_digest=None)
+                    pp("✅ Available sites: {}".format(",".join(matching)), skip_telegram=True)
+                    _send_telegram_text(bot, loop, job.chat_id,
+                        "✅ Available sites: {}".format(",".join(matching)),
+                        reply_markup=_book_now_keyboard(args.url))
                 else:
-                    pp("✅ Available sites: {} — checking again in ~{}s".format(
-                        ",".join(matching), wait_s), telegram_digest=("hit", new_hit))
+                    hit_msg = "✅ Available sites: {} — checking again in ~{}s".format(
+                        ",".join(matching), wait_s)
+                    pp(hit_msg, skip_telegram=True)
+                    if changed:
+                        _send_telegram_text(bot, loop, job.chat_id, hit_msg,
+                            reply_markup=_book_now_keyboard(args.url))
                 # SMS costs money: only on availability transitions (or loop=once).
                 if args.sms and client and (loop_mode == "once" or changed):
                     try:
@@ -966,7 +983,7 @@ def _run_monitor_job(job, manager, bot, loop):
                     _send_telegram_text(
                         bot, loop, job.chat_id,
                         "✅ Job {} done — available: {}".format(job.job_id, ",".join(matching)),
-                        reply_markup=_job_end_keyboard(job.job_id))
+                        reply_markup=_job_end_keyboard(job.job_id, url=args.url))
                     set_log_callback(None)
                     return
             elif not all_avail:
