@@ -950,14 +950,17 @@ def _run_monitor_job(job, manager, bot, loop):
                 new_hit = availability_digest(matching)
                 changed = new_hit != last_hit
                 last_hit = new_hit
+                prefix = "[{}] ".format(park) if park else ""
+                stay = "[{}] ".format(job.stay_label) if job.stay_label else ""
                 if loop_mode == "once":
-                    pp("✅ Available sites: {}".format(",".join(matching)), skip_telegram=True)
-                    _send_telegram_text(bot, loop, job.chat_id,
-                        "✅ Available sites: {}".format(",".join(matching)),
+                    hit_msg = "✅ {}{}Available sites: {}".format(
+                        prefix, stay, ",".join(matching))
+                    pp(hit_msg, skip_telegram=True)
+                    _send_telegram_text(bot, loop, job.chat_id, hit_msg,
                         reply_markup=_book_now_keyboard(args.url))
                 else:
-                    hit_msg = "✅ Available sites: {} — checking again in ~{}s".format(
-                        ",".join(matching), wait_s)
+                    hit_msg = "✅ {}{}Available sites: {} — checking again in ~{}s".format(
+                        prefix, stay, ",".join(matching), wait_s)
                     pp(hit_msg, skip_telegram=True)
                     if changed:
                         _send_telegram_text(bot, loop, job.chat_id, hit_msg,
@@ -966,8 +969,6 @@ def _run_monitor_job(job, manager, bot, loop):
                 if args.sms and client and (loop_mode == "once" or changed):
                     try:
                         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        prefix = "[{}] ".format(park) if park else ""
-                        stay = "[{}] ".format(job.stay_label) if job.stay_label else ""
                         body = "{} - {}{}Available sites: {}\n{}".format(
                             ts, prefix, stay, ",".join(matching), shorten_url(args.url))
                         send_sms(body, client, args.my_phone_number, args.twilio_number)
@@ -982,7 +983,8 @@ def _run_monitor_job(job, manager, bot, loop):
                               job_id=job.job_id, status="done", url=args.url, job_kind="monitor")
                     _send_telegram_text(
                         bot, loop, job.chat_id,
-                        "✅ Job {} done — available: {}".format(job.job_id, ",".join(matching)),
+                        "✅ Job {} done — {}{}available: {}".format(
+                            job.job_id, prefix, stay, ",".join(matching)),
                         reply_markup=_job_end_keyboard(job.job_id, url=args.url))
                     set_log_callback(None)
                     return
