@@ -193,6 +193,7 @@ def prepare_reservation(
     booking_url=None,
     park_name=None,
     file_timestamp=None,
+    job_id=None,
 ):
     available_site_names = list(available_sites.keys())
     requested_sites = requested_sites if requested_sites else available_site_names
@@ -212,7 +213,7 @@ def prepare_reservation(
                     if debug:
                         path = build_debug_screenshot_path(
                             booking_url or "", park_name, "acs",
-                            file_timestamp=file_timestamp,
+                            file_timestamp=file_timestamp, job_id=job_id,
                         )
                         debug_screenshot(driver, path, message="After clicking site")
                     return site, reserve_button
